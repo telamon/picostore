@@ -1,0 +1,31 @@
+{
+  "name": "@telamon/picostore",
+  "version": "1.0.1",
+  "description": "Magical redux-like state handler using picofeed blockchains",
+  "main": "index.js",
+  "scripts": {
+    "lint": "standard",
+    "test": "tape test.js",
+    "debug": "node inspect $(npm bin)/tape test.js",
+    "prepublishOnly": "standard && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/telamon/picostore"
+  },
+  "author": "Tony Ivanov",
+  "license": "AGPL-3.0-or-later",
+  "bugs": {
+    "url": "https://github.com/telamon/picostore"
+  },
+  "homepage": "https://github.com/telamon/picostore",
+  "dependencies": {
+    "picorepo": "^1.0.0"
+  },
+  "devDependencies": {
+    "levelup": "^5.0.1",
+    "memdown": "^6.0.0",
+    "standard": "^16.0.3",
+    "tape": "^5.3.1"
+  }
+}
