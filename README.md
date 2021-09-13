@@ -20,7 +20,7 @@ $ npm install @telamon/picostore levelup
 ```
 
 
-```
+```js
 // Initialize a new store using
 const db = ... // level-dbs-like-interface
 const store = new PicoStore(db)
