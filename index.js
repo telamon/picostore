@@ -7,6 +7,7 @@ class PicoStore {
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
+    this._acceptMutations = mutex()
   }
 
   register (name, initialValue, validator, reducer) {
@@ -30,7 +31,7 @@ class PicoStore {
   }
 
   async load () {
-    if (this._loaded) return
+    if (this._loaded) throw new Error('Store already loaded')
     for (const store of this._stores) {
       const head = await this.repo.readReg(`HEADS/${store.name}`)
       if (!head) continue // Empty
@@ -40,9 +41,16 @@ class PicoStore {
       for (const listener of store.observers) listener(store.value)
     }
     this._loaded = true
+    this._acceptMutations.release()
   }
 
+  /**
+   * Mutates the state, if a reload is in progress the dispatch will wait
+   * for it to complete.
+   */
   async dispatch (patch) {
+    if (!this._loaded) throw Error('Store not ready, call load()')
+    await this._acceptMutations.lock
     const modified = []
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
@@ -51,10 +59,12 @@ class PicoStore {
     const canMerge = local.merge(patch, (block, abort) => {
       let valid = true
       for (const store of this._stores) {
-        if (typeof store.validator === 'function') {
-          valid = valid && !store.validator({ block, state: store.value })
-          if (!valid) abort()
-        }
+        if (typeof store.validator !== 'function') continue
+        // TODO: validators we're designed to pass on falsy values, saying 'truth' in this
+        // context should signify an assertion error.
+        // But since we're not handling assertion errors and I fell into my own pitfall just now..
+        valid = valid && !store.validator({ block, state: store.value })
+        if (!valid) abort()
       }
       if (valid) n++
     })
@@ -74,11 +84,10 @@ class PicoStore {
   async _mutateState (block) {
     const modified = []
     for (const store of this._stores) {
-      if (typeof store.validator === 'function') {
-        if (store.validator({ block, state: store.value })) return modified
-      }
-
       if (typeof store.reducer !== 'function') continue
+      if (typeof store.validator !== 'function') continue
+      if (store.validator({ block, state: store.value })) return modified
+
       const val = store.reducer({ block, state: store.value })
       if (typeof val === 'undefined') continue
       await this.repo.merge(block, this._strategy)
@@ -101,7 +110,11 @@ class PicoStore {
     }, {})
   }
 
+  /**
+   * Restores all registers to initial values and re-applies all mutations from database.
+   */
   async reload () {
+    this._acceptMutations = mutex() // block all incoming mutations
     const modified = []
     const peers = await this.repo.listHeads()
 
@@ -130,6 +143,12 @@ class PicoStore {
         done = true
       }
     }
+
+    // TODO: considered to release mutex with error if occurs within reload this scope,
+    // but there is no engine-independent way to handle/rethrow an error
+    // without clobbering stack-traces.
+    // Some set stack on `throw` others on `new Error()` *shrug*
+    this._acceptMutations.release()
     return modified
   }
 
@@ -143,6 +162,24 @@ class PicoStore {
       store.observers.splice(store.observers.indexOf(observer), 1)
     }
   }
+
+  /**
+   * Hotswaps data-storage immediately reloading store from given bucket
+   * and destroying previous database deleting all values in the background
+   * to free up memory in storage.
+   * returns an array containing two promises:
+   *   Reload op: Store ready for use again when resolves.
+   *   Destroy op: Old database was succesfully cleared when resolved.
+   */
+  hotswap (db) {
+    const prev = this.repo
+    // Swap database and begin reload
+    this.repo = db instanceof PicoRepo ? db : new PicoRepo(db)
+    const reloaded = this.reload()
+    // TODO: move this to PicoRepo#destroy() => Promise
+    const destroyed = prev._db.clear()
+    return [reloaded, destroyed]
+  }
 }
 
 function encodeValue (val) {
@@ -151,6 +188,15 @@ function encodeValue (val) {
 
 function decodeValue (val) {
   return JSON.parse(val)
+}
+
+function mutex () {
+  let release = null
+  const lock = new Promise((resolve, reject) => {
+    release = err => err ? reject(err) : resolve()
+  })
+  if (!release) throw new Error('Mental error')
+  return { lock, release }
 }
 
 module.exports = PicoStore
