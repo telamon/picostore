@@ -92,6 +92,7 @@ test('Hotswap repo/bucket', async t => {
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
+/*
 test.skip('Multi-bucket trust levels', async t => {
   try {
     // Set up kernel
@@ -99,7 +100,7 @@ test.skip('Multi-bucket trust levels', async t => {
       master: DB(),
       cache: DB()
     }
-    const store = new PicoMultiStore(true, buckets)
+    const store = new PicoStore(true, buckets)
     store.register('peers', {}, profileValidator, profileReducer)
     await store.load()
 
@@ -137,3 +138,4 @@ test.skip('Multi-bucket trust levels', async t => {
     return state
   }
 })
+*/
