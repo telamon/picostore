@@ -48,7 +48,7 @@ class PicoStore {
    * Mutates the state, if a reload is in progress the dispatch will wait
    * for it to complete.
    */
-  async dispatch (patch) {
+  async dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     await this._acceptMutations.lock
     const modified = []
@@ -57,16 +57,25 @@ class PicoStore {
     const local = (await this.repo.loadHead(patch.last.key)) || new Feed()
     let n = 0
     const canMerge = local.merge(patch, (block, abort) => {
-      let valid = true
+      const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
         // TODO: validators we're designed to pass on falsy values, saying 'truth' in this
         // context should signify an assertion error.
         // But since we're not handling assertion errors and I fell into my own pitfall just now..
-        valid = valid && !store.validator({ block, state: store.value })
-        if (!valid) abort()
+        let validationError = store.validator({ block, state: store.value })
+        if (!validationError) accepted.push(store)
+        else {
+          if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
+
+          if (loud && validationError !== true) {
+            abort()
+            throw validationError
+          }
+        }
       }
-      if (valid) n++
+      if (accepted.length) n++
+      else abort()
     })
     if (!canMerge) return modified
 

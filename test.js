@@ -123,6 +123,25 @@ test('Buffers should not be lost during state reload', async t => {
   t.end()
 })
 
+test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
+  t.plan(1)
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  // returning "true" from a validator now is a forced silent ignore
+  store.register('y', 0, () => true, ({ block }) => JSON.parse(block.body))
+  store.register('x', 0, () => 'do not want', ({ block }) => JSON.parse(block.body))
+  await store.load()
+  const mutations = new Feed()
+  mutations.append(JSON.stringify(1), sk)
+  try {
+    await store.dispatch(mutations, true)
+  } catch (err) {
+    t.equal(err.message, 'InvalidBlock: do not want')
+  }
+  t.end()
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
