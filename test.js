@@ -89,6 +89,40 @@ test('Hotswap repo/bucket', async t => {
   t.end()
 })
 
+test('Buffers should not be lost during state reload', async t => {
+  const { pk, sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  store.register('pk', {}, () => false, ({ state, block }) => {
+    state.nested = { buf: block.key }
+    state.arr = [block.key]
+    state.prop = block.key
+    return state
+  })
+  await store.load()
+  const mutations = new Feed()
+  mutations.append(JSON.stringify(1), sk)
+  await store.dispatch(mutations)
+  t.ok(pk.equals(store.state.pk.prop))
+  t.ok(pk.equals(store.state.pk.nested.buf))
+  t.ok(pk.equals(store.state.pk.arr[0]))
+
+  // Open second store forcing it to load cached state
+
+  const s2 = new PicoStore(db)
+  s2.register('pk', {}, () => false, ({ state, block }) => {
+    state.nested = { buf: block.key }
+    state.arr = [block.key]
+    state.prop = block.key
+    return state
+  })
+  await s2.load()
+  t.ok(pk.equals(s2.state.pk.prop))
+  t.ok(pk.equals(s2.state.pk.nested.buf))
+  t.ok(pk.equals(s2.state.pk.arr[0]))
+  t.end()
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */

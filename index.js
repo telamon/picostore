@@ -187,7 +187,19 @@ function encodeValue (val) {
 }
 
 function decodeValue (val) {
-  return JSON.parse(val)
+  const o = JSON.parse(val)
+  return fixJsonBuffers(o)
+}
+
+function fixJsonBuffers (o) {
+  if (typeof o === 'object' && o.type === 'Buffer') return Buffer.from(o.data)
+  if (Array.isArray(o)) return o.map(fixJsonBuffers)
+  if (typeof o === 'object') {
+    for (const prop in o) {
+      o[prop] = fixJsonBuffers(o[prop])
+    }
+  }
+  return o
 }
 
 function mutex () {
