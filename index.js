@@ -90,7 +90,7 @@ class PicoStore {
     return modified
   }
 
-  async _mutateState (block) {
+  async _mutateState (block, dryMerge = false) {
     const modified = []
     for (const store of this._stores) {
       if (typeof store.reducer !== 'function') continue
@@ -100,7 +100,8 @@ class PicoStore {
 
       const val = store.reducer({ block, state: store.value })
       if (typeof val === 'undefined') continue
-      await this.repo.merge(block, this._strategy)
+      const merged = await this.repo.merge(block, this._strategy)
+      if (!dryMerge && !merged) continue // Rejected by bucket
       await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
       await this.repo.writeReg(`HEADS/${store.name}`, block.sig)
       await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
@@ -143,7 +144,7 @@ class PicoStore {
         // TODO: Multiparent resolve chains and prioritize
         // paths that lead to `key` (peer id) genesis
         for (const block of part.blocks()) {
-          const mods = await this._mutateState(block)
+          const mods = await this._mutateState(block, true)
           for (const s of mods) {
             if (!~modified.indexOf(s)) modified.push(s)
           }
