@@ -95,7 +95,8 @@ class PicoStore {
     for (const store of this._stores) {
       if (typeof store.reducer !== 'function') continue
       if (typeof store.validator !== 'function') continue
-      if (store.validator({ block, state: store.value })) return modified
+      const rejected = store.validator({ block, state: store.value })
+      if (rejected) continue
 
       const val = store.reducer({ block, state: store.value })
       if (typeof val === 'undefined') continue
@@ -107,7 +108,7 @@ class PicoStore {
       store.value = val // Object.freeze(val)
       store.head = block.sig
       for (const listener of store.observers) listener(store.value)
-      if (!~modified.indexOf(store.name)) modified.push(store.name)
+      modified.push(store.name)
     }
     return modified
   }
@@ -196,19 +197,9 @@ function encodeValue (val) {
 }
 
 function decodeValue (val) {
-  const o = JSON.parse(val)
-  return fixJsonBuffers(o)
-}
-
-function fixJsonBuffers (o) {
-  if (typeof o === 'object' && o.type === 'Buffer') return Buffer.from(o.data)
-  if (Array.isArray(o)) return o.map(fixJsonBuffers)
-  if (typeof o === 'object') {
-    for (const prop in o) {
-      o[prop] = fixJsonBuffers(o[prop])
-    }
-  }
-  return o
+  return JSON.parse(val, (k, o) =>
+    (typeof o === 'object' && o.type === 'Buffer') ? Buffer.from(o.data) : o
+  )
 }
 
 function mutex () {
