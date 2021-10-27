@@ -54,21 +54,20 @@ class PicoStore {
     const modified = []
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
-    const local = (await this.repo.loadHead(patch.last.key)) || new Feed()
+    const local = (await this.repo.loadFeed(patch.last.parentSig, 1)) ||
+      (await this.repo.loadHead(patch.last.key, 1)) ||
+      new Feed()
+
     let n = 0
     const canMerge = local.merge(patch, (block, abort) => {
       const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
-        // TODO: validators we're designed to pass on falsy values, saying 'truth' in this
-        // context should signify an assertion error.
-        // But since we're not handling assertion errors and I fell into my own pitfall just now..
         let validationError = store.validator({ block, state: store.value })
         if (!validationError) accepted.push(store)
         else {
           if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
-
-          if (loud && validationError !== true) {
+          if (loud && validationError !== true) { // Returning 'true' from a validaor explicitly means silent ignore.
             abort()
             throw validationError
           }
@@ -99,7 +98,10 @@ class PicoStore {
       if (rejected) continue
 
       const merged = await this.repo.merge(block, this._strategy)
-      if (!dryMerge && !merged) continue // Rejected by bucket
+      if (!dryMerge && !merged) {
+        console.warn('Block rejected by bucket', block.sig.toString('hex'))
+        continue // Rejected by bucket
+      }
 
       // If repo accepted the change, apply it
       const val = store.reducer({ block, state: store.value })
