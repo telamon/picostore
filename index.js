@@ -98,10 +98,12 @@ class PicoStore {
       const rejected = store.validator({ block, state: store.value })
       if (rejected) continue
 
-      const val = store.reducer({ block, state: store.value })
-      if (typeof val === 'undefined') continue
       const merged = await this.repo.merge(block, this._strategy)
       if (!dryMerge && !merged) continue // Rejected by bucket
+
+      // If repo accepted the change, apply it
+      const val = store.reducer({ block, state: store.value })
+      if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
       await this.repo.writeReg(`HEADS/${store.name}`, block.sig)
       await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
