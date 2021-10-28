@@ -61,11 +61,11 @@ class PicoStore {
     let n = 0
     let p = -1
     const canMerge = local.merge(patch, (block, abort) => {
+      if (p === -1) while ((p + 1) < local.length && !local.get(++p)?.sig.equals(block.parentSig)) { (() => 'NOOP')() } // fuck
+      const parentBlock = block.isGenesis ? null : local.get(p++)
       const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
-        if (p === -1) while ((p + 1) < local.length && !local.get(++p)?.sig.equals(block.parentSig)) { (() => 'NOOP')() } // fuck
-        const parentBlock = block.isGenesis ? null : local.get(p++)
         let validationError = store.validator({ block, parentBlock, state: store.value })
         if (!validationError) accepted.push(store) // no error, proceed.
         else { // handle validation errors
