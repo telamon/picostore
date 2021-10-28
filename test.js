@@ -142,6 +142,41 @@ test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
   t.end()
 })
 
+test('Parent block provided to validator', async t => {
+  t.plan(25)
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+
+  store.register('y', 0,
+    ({ block, parentBlock }) => {
+      if (block.isGenesis) t.notOk(parentBlock, 'Genesis has no parent')
+      else {
+        t.ok(parentBlock, 'Parent available')
+        t.ok(block.parentSig.equals(parentBlock.sig))
+      }
+    },
+    ({ block, parentBlock }) => {
+      if (block.isGenesis) t.notOk(parentBlock, 'Genesis has no parent')
+      else {
+        t.ok(parentBlock, 'Parent available')
+        t.ok(block.parentSig.equals(parentBlock.sig))
+      }
+      return 0
+    }
+  )
+  await store.load()
+
+  const f = new Feed()
+  f.append('0', sk)
+  f.append('1', sk)
+  await store.dispatch(f)
+  f.append('2', sk)
+  await store.dispatch(f.slice(-1))
+  await store.reload()
+  t.end()
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */

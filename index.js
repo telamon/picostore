@@ -59,15 +59,18 @@ class PicoStore {
       new Feed()
 
     let n = 0
+    let p = -1
     const canMerge = local.merge(patch, (block, abort) => {
       const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
-        let validationError = store.validator({ block, state: store.value })
-        if (!validationError) accepted.push(store)
-        else {
+        if (p === -1) while ((p + 1) < local.length && !local.get(++p)?.sig.equals(block.parentSig)) { (() => 'NOOP')() } // fuck
+        const parentBlock = block.isGenesis ? null : local.get(p++)
+        let validationError = store.validator({ block, parentBlock, state: store.value })
+        if (!validationError) accepted.push(store) // no error, proceed.
+        else { // handle validation errors
           if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
-          if (loud && validationError !== true) { // Returning 'true' from a validaor explicitly means silent ignore.
+          if (loud && validationError !== true) { // Returning 'true' from a validator implicity means silent ignore.
             abort()
             throw validationError
           }
@@ -79,9 +82,10 @@ class PicoStore {
     if (!canMerge) return modified
 
     const mutations = local.slice(-n)
-
+    n++
     for (const block of mutations.blocks()) {
-      const mod = await this._mutateState(block)
+      const parentBlock = local.get(-n--)
+      const mod = await this._mutateState(block, parentBlock)
       for (const s of mod) {
         if (!~modified.indexOf(s)) modified.push(s)
       }
@@ -89,22 +93,19 @@ class PicoStore {
     return modified
   }
 
-  async _mutateState (block, dryMerge = false) {
+  async _mutateState (block, parentBlock, dryMerge = false) {
     const modified = []
     for (const store of this._stores) {
       if (typeof store.reducer !== 'function') continue
       if (typeof store.validator !== 'function') continue
-      const rejected = store.validator({ block, state: store.value })
+      const rejected = store.validator({ block, parentBlock, state: store.value })
       if (rejected) continue
 
       const merged = await this.repo.merge(block, this._strategy)
-      if (!dryMerge && !merged) {
-        console.warn('Block rejected by bucket', block.sig.toString('hex'))
-        continue // Rejected by bucket
-      }
+      if (!dryMerge && !merged) continue // Rejected by bucket
 
       // If repo accepted the change, apply it
-      const val = store.reducer({ block, state: store.value })
+      const val = store.reducer({ block, parentBlock, state: store.value })
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
       await this.repo.writeReg(`HEADS/${store.name}`, block.sig)
@@ -147,13 +148,16 @@ class PicoStore {
         const part = await this.repo.loadFeed(ptr)
         // TODO: Multiparent resolve chains and prioritize
         // paths that lead to `key` (peer id) genesis
+        let parentBlock = null
         for (const block of part.blocks()) {
-          const mods = await this._mutateState(block, true)
+          const mods = await this._mutateState(block, parentBlock, true)
+
           for (const s of mods) {
             if (!~modified.indexOf(s)) modified.push(s)
           }
           // if (block.isGenesis) done = true
           // else ptr = some other reference
+          parentBlock = block
         }
         done = true
       }

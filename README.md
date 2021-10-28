@@ -130,7 +130,12 @@ I will from now on provide documentation relational to project activity.
 
 ## Changelog
 
-### 1.0.0 first release
+### [1.0.0] first release
+### [1.3.0] - 2021-10-29
+- added `parentBlock` to validator & reducer interface
+- added `dispatch(feed, loudFail = false)` setting to true will throw on validation error
+- changed returning `true` within a validator silently ignores block even with loudFail active
+- fixed craploads of bugs
 
 ## Contributing
 
