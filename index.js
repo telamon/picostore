@@ -97,21 +97,34 @@ class PicoStore {
   async _mutateState (block, parentBlock, dryMerge = false) {
     const modified = []
     const root = this.state
+
+    // Generate list of stores that want to reduce this block
+    const stores = []
     for (const store of this._stores) {
-      if (typeof store.reducer !== 'function') continue
       if (typeof store.validator !== 'function') continue
+      if (typeof store.reducer !== 'function') continue
       const rejected = store.validator({ block, parentBlock, state: store.value, root })
       if (rejected) continue
+      stores.push(store)
+    }
 
+    // Attempt repo.merge if at least one store accepts block
+    if (stores.length) {
       const merged = await this.repo.merge(block, this._strategy)
-      if (!dryMerge && !merged) continue // Rejected by bucket
+      if (!dryMerge && !merged) return modified // Rejected by bucket
+      // TODO: maybe push block to stupid cache at this point
+      // to avoid discarding an out of order block
+    }
 
+    // Run all state reducers
+    for (const store of stores) {
       // If repo accepted the change, apply it
       const val = store.reducer({ block, parentBlock, state: store.value, root })
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
       await this.repo.writeReg(`HEADS/${store.name}`, block.sig)
       await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
+
       // who needs a seatbelt anyway? let's save some memory.
       store.value = val // Object.freeze(val)
       store.head = block.sig
