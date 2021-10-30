@@ -180,6 +180,32 @@ test('Parent block provided to validator', async t => {
   t.end()
 })
 
+test('Root state available in slices', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+
+  store.register('x', 5, () => true, () => 0) // dummy store
+  store.register('y', 7,
+    ({ root }) => {
+      t.ok(root)
+      t.equal(root.x, 5)
+      t.equal(root.y, 7)
+    },
+    ({ root }) => {
+      t.ok(root)
+      t.equal(root.x, 5)
+      t.equal(root.y, 7)
+      return 8
+    }
+  )
+  await store.load()
+  const f = new Feed()
+  f.append('0', sk)
+  await store.dispatch(f, true)
+  t.end()
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
