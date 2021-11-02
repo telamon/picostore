@@ -86,7 +86,7 @@ class PicoStore {
     n++
     for (const block of mutations.blocks()) {
       const parentBlock = local.get(-n--)
-      const mod = await this._mutateState(block, parentBlock)
+      const mod = await this._mutateState(block, parentBlock, false, loud)
       for (const s of mod) {
         if (!~modified.indexOf(s)) modified.push(s)
       }
@@ -94,7 +94,7 @@ class PicoStore {
     return modified
   }
 
-  async _mutateState (block, parentBlock, dryMerge = false) {
+  async _mutateState (block, parentBlock, dryMerge = false, loud = false) {
     const modified = []
     const root = this.state
 
@@ -111,7 +111,10 @@ class PicoStore {
     // Attempt repo.merge if at least one store accepts block
     if (stores.length) {
       const merged = await this.repo.merge(block, this._strategy)
-      if (!dryMerge && !merged) return modified // Rejected by bucket
+      if (!dryMerge && !merged) {
+        if (loud) console.warn('RejectedByBucket: MergeStrategy failed')
+        return modified // Rejected by bucket
+      }
       // TODO: maybe push block to stupid cache at this point
       // to avoid discarding an out of order block
     }
@@ -222,7 +225,7 @@ function encodeValue (val) {
 
 function decodeValue (val) {
   return JSON.parse(val, (k, o) =>
-    (typeof o === 'object' && o.type === 'Buffer') ? Buffer.from(o.data) : o
+    (o && typeof o === 'object' && o.type === 'Buffer') ? Buffer.from(o.data) : o
   )
 }
 
