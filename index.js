@@ -134,17 +134,28 @@ class PicoStore {
       // If repo accepted the change, apply it
       const val = store.reducer({ block, parentBlock, state: store.value, root })
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
-      await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
-      await this.repo.writeReg(`HEADS/${store.name}`, block.sig)
-      await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
-
-      // who needs a seatbelt anyway? let's save some memory.
-      store.value = val // Object.freeze(val)
-      store.head = block.sig
-      for (const listener of store.observers) listener(store.value)
+      await this._commitHead(store, block.sig, val)
       modified.push(store.name)
     }
+    this._notifyObservers(modified)
     return modified
+  }
+
+  _notifyObservers (modified) {
+    for (const name of modified) {
+      const store = this._stores.find(s => s.name === name)
+      for (const listener of store.observers) listener(store.value)
+    }
+  }
+
+  async _commitHead (store, head, val) {
+    await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
+    await this.repo.writeReg(`HEADS/${store.name}`, head)
+    await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
+
+    // who needs a seatbelt anyway? let's save some memory.
+    store.value = val // Object.freeze(val)
+    store.head = head
   }
 
   get state () {
