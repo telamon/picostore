@@ -54,13 +54,23 @@ class PicoStore {
     const modified = []
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
-    const local = (await this.repo.loadFeed(patch.last.parentSig, 1)) ||
+
+    // Optimization that introduces bugs
+    /* const local = (await this.repo.loadFeed(patch.last.parentSig, 1)) ||
       (await this.repo.loadHead(patch.last.key, 1)) ||
       new Feed()
+      */
+    const local = (await this.repo.loadFeed(patch.last.parentSig)) ||
+      (await this.repo.loadHead(patch.last.key)) ||
+      new Feed()
+
     const root = this.state
     let n = 0
     let p = -1
     const canMerge = local.merge(patch, (block, abort) => {
+      // console.log('UserValidate invoked with', block.body.toString())
+      // This approach dosen't work as slice merges might invoke the user validate function
+      // multiple times for same block
       if (p === -1) while ((p + 1) < local.length && !local.get(++p)?.sig.equals(block.parentSig)) { (() => 'NOOP')() } // fuck
       const parentBlock = block.isGenesis ? null : local.get(p++)
       const accepted = []
