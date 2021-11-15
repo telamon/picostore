@@ -7,7 +7,15 @@ class PicoStore {
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
-    this._acceptMutations = mutex()
+    this._queue = []
+  }
+
+  async _waitLock () {
+    const lock = this._queue.shift()
+    const m = mutex()
+    this._queue.push(m.lock)
+    if (lock) await lock
+    return m.release
   }
 
   register (name, initialValue, validator, reducer) {
@@ -31,6 +39,7 @@ class PicoStore {
   }
 
   async load () {
+    const unlock = await this._waitLock()
     if (this._loaded) throw new Error('Store already loaded')
     for (const store of this._stores) {
       const head = await this.repo.readReg(`HEADS/${store.name}`)
@@ -41,7 +50,7 @@ class PicoStore {
       for (const listener of store.observers) listener(store.value)
     }
     this._loaded = true
-    this._acceptMutations.release()
+    unlock()
   }
 
   /**
@@ -50,7 +59,7 @@ class PicoStore {
    */
   async dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
-    await this._acceptMutations.lock
+    const unlock = await this._waitLock()
     const modified = []
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
@@ -83,6 +92,7 @@ class PicoStore {
           if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
           if (loud && validationError !== true) { // Returning 'true' from a validator implicity means silent ignore.
             abort()
+            unlock()
             throw validationError
           }
         }
@@ -90,7 +100,10 @@ class PicoStore {
       if (accepted.length) n++
       else abort()
     })
-    if (!canMerge) return modified
+    if (!canMerge) {
+      unlock()
+      return modified
+    }
 
     const mutations = local.slice(-n)
     n++
@@ -101,6 +114,7 @@ class PicoStore {
         if (!~modified.indexOf(s)) modified.push(s)
       }
     }
+    unlock()
     return modified
   }
 
@@ -169,7 +183,7 @@ class PicoStore {
    * Restores all registers to initial values and re-applies all mutations from database.
    */
   async reload () {
-    this._acceptMutations = mutex() // block all incoming mutations
+    const unlock = await this._waitLock()
     const modified = []
     const peers = await this.repo.listHeads()
 
@@ -206,7 +220,7 @@ class PicoStore {
     // but there is no engine-independent way to handle/rethrow an error
     // without clobbering stack-traces.
     // Some set stack on `throw` others on `new Error()` *shrug*
-    this._acceptMutations.release()
+    unlock()
     return modified
   }
 

@@ -261,6 +261,38 @@ test('Same block not reduced twice multiple identities', async t => {
   t.equal(f.length, stored.length, 'All blocks persisted')
 })
 
+test('State modifications are mutex locked', async t => {
+  const { pk, sk } = Feed.signPair()
+
+  const db = DB()
+  const store = new PicoStore(db)
+  store.register('x', 0, () => false, ({ block, state }) => {
+    const n = parseInt(block.body.toString())
+    t.ok(state < n, 'unseen block')
+    return n
+  }) // dummy store
+
+  await store.load()
+  const f = new Feed()
+  f.append('1', sk)
+  f.append('2', sk)
+  f.append('3', sk)
+  store.dispatch(f)
+  f.append('4', sk)
+  f.append('5', sk)
+  const f2 = f.clone()
+  f2.append('6', sk)
+  f2.append('7', sk)
+  const tasks = [
+    store.dispatch(f2),
+    store.dispatch(f),
+    store.dispatch(f2)
+  ]
+  await Promise.all(tasks)
+  const stored = await store.repo.loadHead(pk)
+  t.equal(store.state.x, 7, 'Store state is correct')
+  t.equal(f2.length, stored.length, 'All blocks persisted')
+})
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
