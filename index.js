@@ -15,7 +15,15 @@ class PicoStore {
     const m = mutex()
     this._queue.push(m.lock)
     if (lock) await lock
-    return m.release
+    let stack = null
+    try { throw new Error('MutexTimeout') } catch (err) { stack = err.stack }
+    const timerId = setTimeout(() => {
+      console.error('MutexTimeout', stack)
+    }, 5000)
+    return err => {
+      clearTimeout(timerId)
+      m.release(err)
+    }
   }
 
   register (name, initialValue, validator, reducer) {
@@ -34,7 +42,7 @@ class PicoStore {
       head: undefined,
       value: initialValue,
       initialValue,
-      observers: []
+      observers: new Set()
     })
   }
 
@@ -228,11 +236,10 @@ class PicoStore {
     const store = this._stores.find(s => s.name === name)
     if (!store) throw new Error(`No such store: "${name}"`)
     if (typeof observer !== 'function') throw new Error('observer must be a function')
-    store.observers.push(observer)
+    store.observers.add(observer)
     observer(store.value)
-    return () => { // unsub
-      store.observers.splice(store.observers.indexOf(observer), 1)
-    }
+    // unsub
+    return () => store.observers.delete(observer)
   }
 
   /**
