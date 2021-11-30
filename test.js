@@ -293,6 +293,31 @@ test('State modifications are mutex locked', async t => {
   t.equal(store.state.x, 7, 'Store state is correct')
   t.equal(f2.length, stored.length, 'All blocks persisted')
 })
+
+test('Filter does not run on unmutated state', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  store.register('x', 0,
+    ({ block, state }) => {
+      const n = parseInt(block.body.toString())
+      if (state !== n - 1) return 'InvalidSequence'
+    },
+    ({ block, state }) => parseInt(block.body.toString())
+  )
+
+  await store.load()
+  const f = new Feed()
+  f.append('1', sk)
+  await store.dispatch(f, true)
+  f.append('2', sk)
+  f.append('3', sk)
+  f.append('4', sk)
+  f.append('5', sk)
+  await store.dispatch(f, true)
+  t.equal(store.state.x, 5)
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */

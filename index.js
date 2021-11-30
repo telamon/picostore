@@ -68,7 +68,7 @@ class PicoStore {
   async dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     const unlock = await this._waitLock()
-    const modified = []
+
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
 
@@ -81,49 +81,60 @@ class PicoStore {
       (await this.repo.loadHead(patch.last.key)) ||
       new Feed()
 
+    // canMerge?
+    if (!local.clone().merge(patch)) {
+      unlock()
+      return []
+    }
+    const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
+    if (diff < 1) { // Patch contains equal or less blocks than local
+      unlock()
+      return []
+    }
+    const modified = new Set()
     const root = this.state
-    let n = 0
-    let p = -1
-    const canMerge = local.merge(patch, (block, abort) => {
-      // console.log('UserValidate invoked with', block.body.toString())
-      // This approach dosen't work as slice merges might invoke the user validate function
-      // multiple times for same block
-      if (p === -1) while ((p + 1) < local.length && !local.get(++p)?.sig.equals(block.parentSig)) { (() => 'NOOP')() } // fuck
-      const parentBlock = block.isGenesis ? null : local.get(p++)
+
+    let parentBlock = null
+    const _first = patch.get(-diff)
+    if (!_first.isGenesis && !local.length) {
+      unlock()
+      if (loud) throw new Error('NoCommonParent')
+      return []
+    } else if (!_first.isGenesis && local.length) {
+      const it = local.blocks()
+      let res = it.next()
+      while (!parentBlock && !res.done) { // TODO: avoid loop using local.get(something)
+        if (res.value.sig.equals(_first.parentSig)) parentBlock = res.value
+        res = it.next()
+      }
+      if (!parentBlock) {
+        unlock()
+        throw new Error('ParentNotFound') // real logical error
+      }
+    }
+
+    for (const block of patch.blocks(-diff)) {
       const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
         let validationError = store.validator({ block, parentBlock, state: store.value, root })
 
         if (!validationError) accepted.push(store) // no error, proceed.
-        else { // handle validation errors
+        else if (validationError === true) {
+          // NO-OP
+          // Returning 'true' from a validator explicitly means silent ignore.
+        } else if (loud) { // throw validation errors
           if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
-          if (loud && validationError !== true) { // Returning 'true' from a validator implicity means silent ignore.
-            abort()
-            unlock()
-            throw validationError
-          }
+          unlock()
+          throw validationError
         }
       }
-      if (accepted.length) n++
-      else abort()
-    })
-    if (!canMerge) {
-      unlock()
-      return modified
-    }
-
-    const mutations = local.slice(-n)
-    n++
-    for (const block of mutations.blocks()) {
-      const parentBlock = local.get(-n--)
       const mod = await this._mutateState(block, parentBlock, false, loud)
-      for (const s of mod) {
-        if (!~modified.indexOf(s)) modified.push(s)
-      }
+      for (const s of mod) modified.add(s)
+      parentBlock = block
     }
     unlock()
-    return modified
+    return Array.from(modified)
   }
 
   async _mutateState (block, parentBlock, dryMerge = false, loud = false) {
