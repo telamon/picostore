@@ -7,22 +7,24 @@ class PicoStore {
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
-    this._queue = []
+    this._mutex = Promise.resolve(0)
   }
 
   async _waitLock () {
-    const lock = this._queue.shift()
-    const m = mutex()
-    this._queue.push(m.lock)
-    if (lock) await lock
-    let stack = null
-    try { throw new Error('MutexTimeout') } catch (err) { stack = err.stack }
+    const current = this._mutex
+    let release, fail
+    const next = new Promise((resolve, reject) => { release = resolve; fail = reject })
+    this._mutex = this._mutex.then(next)
+    let timeoutError = null
+    try { throw new Error('MutexTimeout') } catch (err) { timeoutError = err }
     const timerId = setTimeout(() => {
-      console.error('MutexTimeout', stack)
-    }, 5000)
-    return err => {
+      console.error('MutexTimeout', timeoutError.stack)
+      fail(timeoutError)
+    }, 15000) // TODO: way to disable timeouts during debugger sessions
+    await current
+    return () => {
       clearTimeout(timerId)
-      m.release(err)
+      release()
     }
   }
 
@@ -81,18 +83,39 @@ class PicoStore {
     if (!this._loaded) throw Error('Store not ready, call load()')
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
-
-    // Optimization that introduces bugs
-    /* const local = (await this.repo.loadFeed(patch.last.parentSig, 1)) ||
-      (await this.repo.loadHead(patch.last.key, 1)) ||
-      new Feed()
-      */
-    const target = patch.first
-    const ptr = target.isGenesis ? target.sig : target.parentSig
-
-    const local = (await this.repo.loadFeed(ptr)) ||
-      (await this.repo.loadHead(patch.last.key)) ||
-      new Feed()
+    /* Oops I broke it again....
+     * In-repo (local):
+     * A0 A1  <-- branch 'A' head
+     * B0 <-- branch 'B' head
+     *
+     * incoming (patch): A1 B1
+     *
+     * Expected result:
+     * A0 A1 B1 <-- branch 'A' head
+     * B0 <-- branch 'B' head
+     *
+     * Ex. #2 (local)
+     * A0 A1 B1  <-- branch 'A' head
+     * B0 <-- branch 'B' head
+     *
+     * Patch: B1 A2
+     *
+     * Expected result:
+     * A0 A1 B1 A2 <-- branch 'A' head
+     * B0 <-- branch 'B' head
+     */
+    let local = null // Target branch to merge to
+    if (patch.first.isGenesis) {
+      const owner = patch.first.key
+      const tail = await this.repo.tailOf(owner)
+      if (tail) local = await this.repo.loadHead(owner)
+      else local = new Feed() // happy birthday feed!
+    } else {
+      // Load entire branch into memory twice...
+      const owner = await this.repo._traceOwnerOf(patch.first.parentSig)
+      if (!owner) throw new Error('Unknown target branch')
+      local = await this.repo.loadHead(owner)
+    }
 
     // canMerge?
     if (!local.clone().merge(patch)) return []
@@ -210,44 +233,49 @@ class PicoStore {
    */
   async reload () {
     const unlock = await this._waitLock()
-    const modified = []
-    const peers = await this.repo.listHeads()
+    try {
+      const modified = []
+      const peers = await this.repo.listHeads()
 
-    for (const store of this._stores) {
-      store.value = store.initialValue
-      store.version = 0
-      store.head = undefined
-      for (const listener of store.observers) listener(store.value)
-    }
-
-    // for (const { key, value: ptr } of peers) {
-    for (const { value: ptr } of peers) {
-      let done = false
-      while (!done) {
-        const part = await this.repo.loadFeed(ptr)
-        // TODO: Multiparent resolve chains and prioritize
-        // paths that lead to `key` (peer id) genesis
-        let parentBlock = null
-        for (const block of part.blocks()) {
-          const mods = await this._mutateState(block, parentBlock, true)
-
-          for (const s of mods) {
-            if (!~modified.indexOf(s)) modified.push(s)
-          }
-          // if (block.isGenesis) done = true
-          // else ptr = some other reference
-          parentBlock = block
-        }
-        done = true
+      for (const store of this._stores) {
+        store.value = store.initialValue
+        store.version = 0
+        store.head = undefined
+        for (const listener of store.observers) listener(store.value)
       }
-    }
 
-    // TODO: considered to release mutex with error if occurs within reload this scope,
-    // but there is no engine-independent way to handle/rethrow an error
-    // without clobbering stack-traces.
-    // Some set stack on `throw` others on `new Error()` *shrug*
-    unlock()
-    return modified
+      // for (const { key, value: ptr } of peers) {
+      for (const { value: ptr } of peers) {
+        let done = false
+        while (!done) {
+          const part = await this.repo.loadFeed(ptr)
+          // TODO: Multiparent resolve chains and prioritize
+          // paths that lead to `key` (peer id) genesis
+          let parentBlock = null
+          for (const block of part.blocks()) {
+            const mods = await this._mutateState(block, parentBlock, true)
+
+            for (const s of mods) {
+              if (!~modified.indexOf(s)) modified.push(s)
+            }
+            // if (block.isGenesis) done = true
+            // else ptr = some other reference
+            parentBlock = block
+          }
+          done = true
+        }
+      }
+
+      // TODO: considered to release mutex with error if occurs within reload this scope,
+      // but there is no engine-independent way to handle/rethrow an error
+      // without clobbering stack-traces.
+      // Some set stack on `throw` others on `new Error()` *shrug*
+      unlock()
+      return modified
+    } catch (err) {
+      unlock()
+      throw err
+    }
   }
 
   on (name, observer) {
@@ -287,15 +315,6 @@ function decodeValue (val) {
   return JSON.parse(val, (k, o) =>
     (o && typeof o === 'object' && o.type === 'Buffer') ? Buffer.from(o.data) : o
   )
-}
-
-function mutex () {
-  let release = null
-  const lock = new Promise((resolve, reject) => {
-    release = err => err ? reject(err) : resolve()
-  })
-  if (!release) throw new Error('Mental error')
-  return { lock, release }
 }
 
 module.exports = PicoStore

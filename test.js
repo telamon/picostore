@@ -143,7 +143,7 @@ test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
 })
 
 test('Parent block provided to validator', async t => {
-  t.plan(43)
+  t.plan(35)
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new PicoStore(db)
