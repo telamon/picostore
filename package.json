@@ -20,7 +20,7 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "dependencies": {
-    "picorepo": "^1.0.0"
+    "picorepo": "^1.1.1"
   },
   "devDependencies": {
     "levelup": "^5.0.1",
