@@ -14,13 +14,13 @@ class PicoStore {
     const current = this._mutex
     let release, fail
     const next = new Promise((resolve, reject) => { release = resolve; fail = reject })
-    this._mutex = this._mutex.then(next)
+    this._mutex = next
     let timeoutError = null
     try { throw new Error('MutexTimeout') } catch (err) { timeoutError = err }
     const timerId = setTimeout(() => {
       console.error('MutexTimeout', timeoutError.stack)
       fail(timeoutError)
-    }, 15000) // TODO: way to disable timeouts during debugger sessions
+    }, 5000) // TODO: way to disable timeouts during debugger sessions
     await current
     return () => {
       clearTimeout(timerId)
