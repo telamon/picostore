@@ -65,10 +65,20 @@ class PicoStore {
    * Mutates the state, if a reload is in progress the dispatch will wait
    * for it to complete.
    */
-  async dispatch (patch, loud = false) {
-    if (!this._loaded) throw Error('Store not ready, call load()')
+  async dispatch (patch, loud) {
     const unlock = await this._waitLock()
+    try { // Ensure mutex release on error
+      const res = await this._dispatch(patch, loud)
+      unlock()
+      return res
+    } catch (err) {
+      unlock()
+      throw err
+    }
+  }
 
+  async _dispatch (patch, loud = false) {
+    if (!this._loaded) throw Error('Store not ready, call load()')
     patch = Feed.from(patch)
     // Check if head can be fast-forwarded
 
@@ -77,27 +87,25 @@ class PicoStore {
       (await this.repo.loadHead(patch.last.key, 1)) ||
       new Feed()
       */
-    const local = (await this.repo.loadFeed(patch.last.parentSig)) ||
+    const target = patch.first
+    const ptr = target.isGenesis ? target.sig : target.parentSig
+
+    const local = (await this.repo.loadFeed(ptr)) ||
       (await this.repo.loadHead(patch.last.key)) ||
       new Feed()
 
     // canMerge?
-    if (!local.clone().merge(patch)) {
-      unlock()
-      return []
-    }
+    if (!local.clone().merge(patch)) return []
+
     const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
-    if (diff < 1) { // Patch contains equal or less blocks than local
-      unlock()
-      return []
-    }
+    if (diff < 1) return [] // Patch contains equal or less blocks than local
+
     const modified = new Set()
     const root = this.state
 
     let parentBlock = null
     const _first = patch.get(-diff)
     if (!_first.isGenesis && !local.length) {
-      unlock()
       if (loud) throw new Error('NoCommonParent')
       return []
     } else if (!_first.isGenesis && local.length) {
@@ -108,7 +116,6 @@ class PicoStore {
         res = it.next()
       }
       if (!parentBlock) {
-        unlock()
         throw new Error('ParentNotFound') // real logical error
       }
     }
@@ -125,15 +132,15 @@ class PicoStore {
           // Returning 'true' from a validator explicitly means silent ignore.
         } else if (loud) { // throw validation errors
           if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
-          unlock()
           throw validationError
         }
       }
+      if (!accepted.length) break // reject rest of chain if block not accepted
       const mod = await this._mutateState(block, parentBlock, false, loud)
+
       for (const s of mod) modified.add(s)
       parentBlock = block
     }
-    unlock()
     return Array.from(modified)
   }
 
