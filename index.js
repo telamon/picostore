@@ -3,7 +3,7 @@ const Feed = require('picofeed')
 
 class PicoStore {
   constructor (db, mergeStrategy) {
-    this.repo = db instanceof PicoRepo ? db : new PicoRepo(db)
+    this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
