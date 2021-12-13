@@ -210,11 +210,11 @@ class PicoStore {
     // NOTE: want to avoid reusing term 'signal' as it's a function
     // in reducer context, candidates: code/type/event ('type' already overused)
     for (const [code, payload] of interrupts) {
-      for (const store of stores) {
+      for (const store of this._stores) {
         if (typeof store.trap !== 'function') continue
         const root = this.state
         const val = store.trap({ code, payload, block, parentBlock, state: store.value, root })
-        if (typeof val === 'undefined') continue // no change
+        if (typeof val === 'undefined') continue // undefined equals no change
         await this._commitHead(store, block.sig, val)
         modified.push(store.name)
       }
