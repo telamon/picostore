@@ -28,10 +28,10 @@ class PicoStore {
     }
   }
 
-  register (name, initialValue, validator, reducer) {
+  register (name, initialValue, validator, reducer, trap) {
     if (this._loaded) throw new Error('register() must be invoked before load()')
     if (typeof name !== 'string') {
-      return this.register(name.name, name.initialValue, name.filter, name.reducer)
+      return this.register(name.name, name.initialValue, name.filter, name.reducer, name.trap)
     } else if (typeof initialValue === 'function') {
       return this.register(name, undefined, initialValue, validator)
     }
@@ -40,6 +40,7 @@ class PicoStore {
       name,
       validator,
       reducer,
+      trap,
       version: 0,
       head: undefined,
       value: initialValue,
@@ -169,13 +170,13 @@ class PicoStore {
 
   async _mutateState (block, parentBlock, dryMerge = false, loud = false) {
     const modified = []
-    const root = this.state
 
     // Generate list of stores that want to reduce this block
     const stores = []
     for (const store of this._stores) {
       if (typeof store.validator !== 'function') continue
       if (typeof store.reducer !== 'function') continue
+      const root = this.state
       const rejected = store.validator({ block, parentBlock, state: store.value, root })
       if (rejected) continue
       stores.push(store)
@@ -191,15 +192,34 @@ class PicoStore {
       // TODO: maybe push block to stupid cache at this point
       // to avoid discarding an out of order block
     }
+    // Interrupts are buffered until after the mutations have run
+    const interrupts = []
+    const signal = (i, p) => interrupts.push([i, p])
 
     // Run all state reducers
     for (const store of stores) {
       // If repo accepted the change, apply it
-      const val = store.reducer({ block, parentBlock, state: store.value, root })
+      const root = this.state
+      const val = store.reducer({ block, parentBlock, state: store.value, root, signal })
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this._commitHead(store, block.sig, val)
       modified.push(store.name)
     }
+
+    // Run all traps in signal order
+    // NOTE: want to avoid reusing term 'signal' as it's a function
+    // in reducer context, candidates: code/type/event ('type' already overused)
+    for (const [code, payload] of interrupts) {
+      for (const store of stores) {
+        if (typeof store.trap !== 'function') continue
+        const root = this.state
+        const val = store.trap({ code, payload, block, parentBlock, state: store.value, root })
+        if (typeof val === 'undefined') continue // no change
+        await this._commitHead(store, block.sig, val)
+        modified.push(store.name)
+      }
+    }
+
     this._notifyObservers(modified)
     return modified
   }

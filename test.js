@@ -232,7 +232,7 @@ test('Same block not reduced twice', async t => {
   t.equal(f.length, stored.length, 'All blocks persisted')
 })
 
-test('Same block not reduced twice multiple identities', async t => {
+test('Same block not reduced twice, given multiple identities', async t => {
   const a = Feed.signPair().sk
   const b = Feed.signPair().sk
 
@@ -315,6 +315,89 @@ test('Filter does not run on unmutated state', async t => {
   f.append('5', sk)
   await store.dispatch(f, true)
   t.equal(store.state.x, 5)
+})
+
+test('reducerContext.signal(int, payload)', async t => {
+  /**
+   * Each slices provides their own registers, a memory region
+   * that they own and maintain.
+   * When a high-level change happens in one slice that needs to be
+   * reflected in another. I want to change the dispatch lifecycle:
+   * - Phase 0: canMerge?(patch)
+   * - Phase 1: slice.filter(block)
+   * - Phase 2: slice.reduce(block) =>  lv0 state, interrupts
+   * + Phase 3: slice.handleInterrupts(interrupts) => lv1 state
+   * - Phase 4: notify slice.observers
+   *
+   *   Introduces internal high-priority higher-level-events that run before
+   *   register observers are notified.
+   */
+  // The Problem:
+  const db = DB()
+  const store = new PicoStore(db)
+  const INT_RST = 0 // 'reset'-interrupt
+  let resetFired = 0
+  // X.slice is a incremental counter
+  store.register({
+    name: 'x',
+    initialValue: 0,
+    filter: ({ block, state }) => {
+      return parseInt(block.body.toString()) > state
+        ? false // accept
+        : 'XValueTooLow' // reject
+    },
+    reducer: ({ block, state }) => parseInt(block.body.toString()),
+    trap: ({ code, payload, state, root }) => {
+      if (code !== INT_RST) return // undefined return means trap not triggered.
+      t.equal(code, INT_RST)
+      t.equal(payload, 'hit-the-brakes!', 'playload visible')
+      t.ok(root)
+      resetFired++
+      return 0
+    }
+  })
+  // Y.slice computes (x^2) and signals reset at a threshhold
+  function compute (x) { return x * x }
+  store.register({
+    name: 'y',
+    initialValue: 0,
+    filter: ({ block, state }) => {
+      return compute(parseInt(block.body.toString())) > state
+        ? false // accept
+        : 'YValueTooLow' // reject
+    },
+    reducer: ({ block, state, root, signal }) => {
+      const y = compute(parseInt(block.body.toString()))
+      if (y > root.x * 5) { // Too fast, reset throttle
+        t.equal(typeof signal, 'function', 'signal method provided in context')
+        signal(INT_RST, 'hit-the-brakes!')
+        return 0
+      } else return y // accellerate as usual
+    }
+  })
+  await store.load()
+  const { sk } = Feed.signPair()
+  const f = new Feed()
+  f.append('1', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 0, 'Signal not yet triggered')
+  f.append('2', sk)
+  f.append('3', sk)
+  f.append('4', sk)
+  f.append('5', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 0, 'not yet')
+  f.append('6', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 1, 'Fired')
+  t.equal(store.state.x, 0)
+  t.equal(store.state.y, 0)
+  f.append('3', sk)
+  f.append('4', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 1, 'reset still only once')
+  t.equal(store.state.x, 4, 'Counter works after reset')
+  t.equal(store.state.y, 16)
 })
 
 /* TODO: instead of complicating PicoStore to alow multiple storages
