@@ -9,6 +9,7 @@ class PicoStore {
     this._stores = []
     this._loaded = false
     this._mutex = Promise.resolve(0)
+    this._tap = null // global sigint trap
     this._packr = null
   }
 
@@ -179,6 +180,7 @@ class PicoStore {
       for (const s of mod) modified.add(s)
       parentBlock = block
     }
+    this._notifyObservers(modified)
     return Array.from(modified)
   }
 
@@ -233,8 +235,9 @@ class PicoStore {
         modified.push(store.name)
       }
     }
-
-    this._notifyObservers(modified)
+    if (typeof this._tap === 'function') {
+      for (const [code, payload] of interrupts) this._tap(code, payload)
+    }
     return modified
   }
 
@@ -305,6 +308,7 @@ class PicoStore {
       // without clobbering stack-traces.
       // Some set stack on `throw` others on `new Error()` *shrug*
       unlock()
+      this._notifyObservers(modified)
       return modified
     } catch (err) {
       unlock()

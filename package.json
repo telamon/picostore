@@ -13,7 +13,7 @@
     "type": "git",
     "url": "git://github.com/telamon/picostore"
   },
-  "author": "Tony Ivanov",
+  "author": "Tony Ivanov <telamohn@pm.me>",
   "license": "AGPL-3.0-or-later",
   "bugs": {
     "url": "https://github.com/telamon/picostore"
