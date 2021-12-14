@@ -1,6 +1,7 @@
 const PicoRepo = require('picorepo')
 const Feed = require('picofeed')
-
+const { Packr, pack, unpack } = require('msgpackr')
+const STRUCTS = 'msgpackr::structs'
 class PicoStore {
   constructor (db, mergeStrategy) {
     this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
@@ -8,6 +9,7 @@ class PicoStore {
     this._stores = []
     this._loaded = false
     this._mutex = Promise.resolve(0)
+    this._packr = null
   }
 
   async _waitLock () {
@@ -52,12 +54,24 @@ class PicoStore {
   async load () {
     const unlock = await this._waitLock()
     if (this._loaded) throw new Error('Store already loaded')
+
+    let structures = await this.repo.readReg(STRUCTS)
+    if (structures) structures = unpack(structures)
+    else structures = []
+
+    this._packr = new Packr({
+      structures,
+      saveStructures: () => this.repo.writeReg(STRUCTS, pack(structures))
+        // .then(console.info.bind(null, 'msgpackr:structs saved'))
+        .catch(console.error.bind(null, 'Failed saving msgpackr:structs'))
+    })
+
     for (const store of this._stores) {
       const head = await this.repo.readReg(`HEADS/${store.name}`)
       if (!head) continue // Empty
       store.head = head
-      store.version = decodeValue(await this.repo.readReg(`VER/${store.name}`))
-      store.value = decodeValue(await this.repo.readReg(`STATES/${store.name}`))
+      store.version = this._decodeValue(await this.repo.readReg(`VER/${store.name}`))
+      store.value = this._decodeValue(await this.repo.readReg(`STATES/${store.name}`))
       for (const listener of store.observers) listener(store.value)
     }
     this._loaded = true
@@ -232,9 +246,9 @@ class PicoStore {
   }
 
   async _commitHead (store, head, val) {
-    await this.repo.writeReg(`STATES/${store.name}`, encodeValue(val))
+    await this.repo.writeReg(`STATES/${store.name}`, this._encodeValue(val))
     await this.repo.writeReg(`HEADS/${store.name}`, head)
-    await this.repo.writeReg(`VER/${store.name}`, encodeValue(store.version++))
+    await this.repo.writeReg(`VER/${store.name}`, this._encodeValue(store.version++))
 
     // who needs a seatbelt anyway? let's save some memory.
     store.value = val // Object.freeze(val)
@@ -325,16 +339,15 @@ class PicoStore {
     const destroyed = prev._db.clear()
     return [reloaded, destroyed]
   }
-}
 
-function encodeValue (val) {
-  return JSON.stringify(val)
-}
+  _decodeValue (buf) {
+    if (!buf) return buf
+    return this._packr.unpack(buf)
+  }
 
-function decodeValue (val) {
-  return JSON.parse(val, (k, o) =>
-    (o && typeof o === 'object' && o.type === 'Buffer') ? Buffer.from(o.data) : o
-  )
+  _encodeValue (obj) {
+    return this._packr.pack(obj)
+  }
 }
 
 module.exports = PicoStore
