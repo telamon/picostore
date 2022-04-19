@@ -133,6 +133,11 @@ class PicoStore {
       local = await this.repo.loadHead(owner)
     }
 
+    // TODO: Local can be undef, happens when blocks are sent
+    // sparsely for feeds that already been GC'd or yet unknown.
+    // Should be fixed somehow using a temporary scratch bucket
+    // where unmergable blocks are held until chains are resolved.
+
     // canMerge?
     if (!local.clone().merge(patch)) return []
 
