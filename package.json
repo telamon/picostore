@@ -1,6 +1,6 @@
 {
   "name": "@telamon/picostore",
-  "version": "1.6.4",
+  "version": "1.7.0",
   "description": "Magical redux-like state handler using picofeed blockchains",
   "main": "index.js",
   "scripts": {
