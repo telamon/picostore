@@ -400,53 +400,33 @@ test('reducerContext.signal(int, payload)', async t => {
   t.equal(store.state.y, 16)
 })
 
+test('Allow multiple feeds from same author', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  store.repo.allowDetached = true
+
+  store.register('x', [],
+    ({ block, state }) => false,
+    ({ block, state }) => [...state, parseInt(block.body.toString())]
+  )
+
+  await store.load()
+  const a = new Feed()
+  a.append('1', sk)
+  a.append('7', sk)
+  await store.dispatch(a, true)
+
+  const b = new Feed()
+  b.append('2', sk)
+  b.append('9', sk)
+
+  await store.dispatch(b, true)
+
+  // await require('picorepo/dot').dump(store.repo)
+  t.deepEqual(store.state.x, [1, 7, 2, 9])
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
-/*
-test.skip('Multi-bucket trust levels', async t => {
-  try {
-    // Set up kernel
-    const buckets = {
-      master: DB(),
-      cache: DB()
-    }
-    const store = new PicoStore(true, buckets)
-    store.register('peers', {}, profileValidator, profileReducer)
-    await store.load()
-
-    // Set up peers
-    const Alice = Feed.signPair() // Alice is a friend
-    const Daphne = Feed.signPair() // Daphne is a hot wife in your area looking for action.
-    // I get ya Bob, don't despair, finding a good peer was never supposed to be easy.
-
-    // Set up a list of trusted peers
-    const friends = [Alice.pk]
-
-    // Dispatch mutation/blocks
-    await store.dispatch(mkProfile('Daphne', 35, 'Visit me at tinyscam.com/Phishy', Daphne.sk))
-
-    debugger
-  } catch (e) { t.error(e) }
-
-  function mkProfile (name, age, tagline, sk) {
-    const f = new Feed()
-    f.append(JSON.stringify({ name, age, tagline }), sk)
-    return f
-  }
-
-  // Decides validity of block and destination bucket
-  function profileValidator ({ state, block }) {
-    const profile = JSON.parse(block.body)
-    debugger
-    if (n <= state) return true
-  }
-
-  function profileReducer ({ state, block }) {
-    const key = block.key.toString('hex')
-    const profile = JSON.parse(block.body)
-    state[key] = profile
-    return state
-  }
-})
-*/

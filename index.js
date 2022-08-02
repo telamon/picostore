@@ -11,6 +11,7 @@ class PicoStore {
     this._mutex = Promise.resolve(0)
     this._tap = null // global sigint trap
     this._packr = null
+    this.mutexTimeout = 5000
   }
 
   async _waitLock () {
@@ -23,7 +24,7 @@ class PicoStore {
     const timerId = setTimeout(() => {
       console.error('MutexTimeout', timeoutError.stack)
       fail(timeoutError)
-    }, 5000) // TODO: way to disable timeouts during debugger sessions
+    }, this.mutexTimeout)
     await current
     return () => {
       clearTimeout(timerId)
@@ -98,39 +99,17 @@ class PicoStore {
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     patch = Feed.from(patch)
-    // Check if head can be fast-forwarded
-    /* Oops I broke it again....
-     * In-repo (local):
-     * A0 A1  <-- branch 'A' head
-     * B0 <-- branch 'B' head
-     *
-     * incoming (patch): A1 B1
-     *
-     * Expected result:
-     * A0 A1 B1 <-- branch 'A' head
-     * B0 <-- branch 'B' head
-     *
-     * Ex. #2 (local)
-     * A0 A1 B1  <-- branch 'A' head
-     * B0 <-- branch 'B' head
-     *
-     * Patch: B1 A2
-     *
-     * Expected result:
-     * A0 A1 B1 A2 <-- branch 'A' head
-     * B0 <-- branch 'B' head
-     */
+
     let local = null // Target branch to merge to
-    if (patch.first.isGenesis) {
-      const owner = patch.first.key
-      const tail = await this.repo.tailOf(owner)
-      if (tail) local = await this.repo.loadHead(owner)
-      else local = new Feed() // happy birthday feed!
-    } else {
-      // Load entire branch into memory twice...
-      const owner = await this.repo._traceOwnerOf(patch.first.parentSig)
-      if (!owner) throw new Error('Unknown target branch')
-      local = await this.repo.loadHead(owner)
+    try {
+      const sig = patch.first.isGenesis
+        ? patch.first.sig
+        : patch.first.parentSig
+      local = await this.repo.resolveFeed(sig)
+    } catch (err) {
+      if (err.message !== 'Unknown feed') throw err
+      if (!patch.first.isGenesis) throw new Error('Unknown target branch')
+      local = new Feed() // Happy birthday!
     }
 
     // TODO: Local can be undef, happens when blocks are sent
