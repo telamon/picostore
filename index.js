@@ -118,7 +118,10 @@ class PicoStore {
     // where unmergable blocks are held until chains are resolved.
 
     // canMerge?
-    if (!local.clone().merge(patch)) return []
+    if (!local.clone().merge(patch)) {
+      if (loud) throw new Error('UnmergablePatch')
+      else return []
+    }
 
     const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
     if (diff < 1) return [] // Patch contains equal or less blocks than local

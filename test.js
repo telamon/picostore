@@ -427,6 +427,34 @@ test('Allow multiple feeds from same author', async t => {
   t.deepEqual(store.state.x, [1, 7, 2, 9])
 })
 
+test('Dispatching blocks one at a time', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  store.mutexTimeout = 60000000
+  store.register('x', 0,
+    ({ block, state }) => {
+      const n = parseInt(block.body.toString())
+      if (state !== n - 1) return 'InvalidSequence'
+    },
+    ({ block, state }) => parseInt(block.body.toString())
+  )
+  const loud = true
+  await store.load()
+  const f = new Feed()
+  f.append('1', sk)
+  await store.dispatch(f, loud)
+  f.append('2', sk)
+  await store.dispatch(f.slice(-1), loud)
+  f.append('3', sk)
+  await store.dispatch(f.slice(-1), loud)
+  f.append('4', sk)
+  await store.dispatch(f.slice(-1), loud)
+  t.equal(store.state.x, 4)
+  const l = await store.repo.resolveFeed(f.first.sig)
+  t.ok(l.last.sig.equals(f.last.sig), 'repo and store is in sync')
+})
+
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
