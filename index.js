@@ -196,7 +196,7 @@ class PicoStore {
       if (typeof store.validator !== 'function') continue
       if (typeof store.reducer !== 'function') continue
       const root = this.state
-      const rejected = store.validator({ block, parentBlock, state: store.value, root })
+      const rejected = store.validator({ block, parentBlock, state: store.value, root, ...tags })
       if (rejected) continue
       stores.push(store)
     }
