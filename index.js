@@ -123,6 +123,16 @@ class PicoStore {
       else return []
     }
 
+    // Extract tags (used by application to keep track of objects)
+    const tags = {}
+    if (local.first?.isGenesis) {
+      tags.HEAD = local.first.key
+      tags.CHAIN = local.first.sig
+    } else if (!local.length && patch.first.isGenesis) {
+      tags.HEAD = patch.first.key
+      tags.CHAIN = patch.first.sig
+    }
+
     const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
     if (diff < 1) return [] // Patch contains equal or less blocks than local
 
@@ -150,7 +160,13 @@ class PicoStore {
       const accepted = []
       for (const store of this._stores) {
         if (typeof store.validator !== 'function') continue
-        let validationError = store.validator({ block, parentBlock, state: store.value, root })
+        let validationError = store.validator({
+          block,
+          parentBlock,
+          state: store.value,
+          root,
+          ...tags
+        })
 
         if (!validationError) accepted.push(store) // no error, proceed.
         else if (validationError === true) {
@@ -162,7 +178,7 @@ class PicoStore {
         }
       }
       if (!accepted.length) break // reject rest of chain if block not accepted
-      const mod = await this._mutateState(block, parentBlock, false, loud)
+      const mod = await this._mutateState(block, parentBlock, tags, false, loud)
 
       for (const s of mod) modified.add(s)
       parentBlock = block
@@ -171,7 +187,7 @@ class PicoStore {
     return Array.from(modified)
   }
 
-  async _mutateState (block, parentBlock, dryMerge = false, loud = false) {
+  async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
     const modified = []
 
     // Generate list of stores that want to reduce this block
@@ -203,7 +219,7 @@ class PicoStore {
     for (const store of stores) {
       // If repo accepted the change, apply it
       const root = this.state
-      const val = store.reducer({ block, parentBlock, state: store.value, root, signal })
+      const val = store.reducer({ block, parentBlock, state: store.value, root, signal, ...tags })
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this._commitHead(store, block.sig, val)
       modified.push(store.name)
@@ -259,7 +275,7 @@ class PicoStore {
     const unlock = await this._waitLock()
     try {
       const modified = []
-      const peers = await this.repo.listHeads()
+      const feeds = await this.repo.listFeeds()
 
       for (const store of this._stores) {
         store.value = store.initialValue
@@ -268,32 +284,22 @@ class PicoStore {
         for (const listener of store.observers) listener(store.value)
       }
 
-      // for (const { key, value: ptr } of peers) {
-      for (const { value: ptr } of peers) {
-        let done = false
-        while (!done) {
-          const part = await this.repo.loadFeed(ptr)
-          // TODO: Multiparent resolve chains and prioritize
-          // paths that lead to `key` (peer id) genesis
-          let parentBlock = null
-          for (const block of part.blocks()) {
-            const mods = await this._mutateState(block, parentBlock, true)
+      for (const { key: ptr, value: CHAIN } of feeds) {
+        const part = await this.repo.loadFeed(ptr)
+        const tags = {
+          HEAD: part.first.key,
+          CHAIN
+        }
+        let parentBlock = null
+        for (const block of part.blocks()) {
+          const mods = await this._mutateState(block, parentBlock, tags, true)
 
-            for (const s of mods) {
-              if (!~modified.indexOf(s)) modified.push(s)
-            }
-            // if (block.isGenesis) done = true
-            // else ptr = some other reference
-            parentBlock = block
+          for (const s of mods) {
+            if (!~modified.indexOf(s)) modified.push(s)
           }
-          done = true
+          parentBlock = block
         }
       }
-
-      // TODO: considered to release mutex with error if occurs within reload this scope,
-      // but there is no engine-independent way to handle/rethrow an error
-      // without clobbering stack-traces.
-      // Some set stack on `throw` others on `new Error()` *shrug*
       unlock()
       this._notifyObservers(modified)
       return modified
