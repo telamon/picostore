@@ -1,9 +1,11 @@
 const test = require('tape')
 const Feed = require('picofeed')
-const levelup = require('levelup')
-const memdown = require('memdown')
+const { MemoryLevel } = require('memory-level')
 const PicoStore = require('.')
-const DB = () => levelup(memdown())
+const DB = () => new MemoryLevel({
+  valueEncoding: 'buffer',
+  keyEncoding: 'buffer'
+})
 
 test('PicoStore', async t => {
   const db = DB()
