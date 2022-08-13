@@ -5,6 +5,7 @@ const STRUCTS = 'msgpackr::structs'
 class PicoStore {
   constructor (db, mergeStrategy) {
     this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
+    this.cache = new SparseBlockCache(db)
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
@@ -108,14 +109,22 @@ class PicoStore {
       local = await this.repo.resolveFeed(sig)
     } catch (err) {
       if (err.message !== 'Unknown feed') throw err
-      if (!patch.first.isGenesis) throw new Error('Unknown target branch')
-      local = new Feed() // Happy birthday!
+      if (patch.first.isGenesis) local = new Feed() // Happy birthday!
+      else {
+        await this.cache.push(patch) // Stash for later
+        // throw new Error('UnknownTargetBranch')
+        return []
+      }
     }
 
-    // TODO: Local can be undef, happens when blocks are sent
-    // sparsely for feeds that already been GC'd or yet unknown.
-    // Should be fixed somehow using a temporary scratch bucket
-    // where unmergable blocks are held until chains are resolved.
+    // Local reference point exists,
+    // attempt to extend patch using cache
+    for (const block of patch.blocks()) {
+      const orphan = await this.cache.pop(block.sig)
+      if (!orphan) continue
+      const m = patch.merge(orphan)
+      if (!m) throw new Error('Well this is awkward')
+    }
 
     // canMerge?
     if (!local.clone().merge(patch)) {
@@ -155,7 +164,7 @@ class PicoStore {
         throw new Error('ParentNotFound') // real logical error
       }
     }
-
+    let nMerged = 0
     for (const block of patch.blocks(-diff)) {
       const accepted = []
       for (const store of this._stores) {
@@ -182,9 +191,19 @@ class PicoStore {
 
       for (const s of mod) modified.add(s)
       parentBlock = block
+      nMerged++
     }
     this._notifyObservers(modified)
-    return Array.from(modified)
+
+    // TODO: Clean this up, patch needs
+    // to be exported to RPC for transmission
+    const m = Array.from(modified)
+    Object.defineProperty(m, 'patch', {
+      enumerable: false,
+      get () { return patch.slice(-diff, -diff + nMerged) }
+    })
+
+    return m
   }
 
   async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
@@ -208,9 +227,8 @@ class PicoStore {
         if (loud) console.warn('RejectedByBucket: MergeStrategy failed')
         return modified // Rejected by bucket
       }
-      // TODO: maybe push block to stupid cache at this point
-      // to avoid discarding an out of order block
     }
+
     // Interrupts are buffered until after the mutations have run
     const interrupts = []
     const signal = (i, p) => interrupts.push([i, p])
@@ -232,7 +250,7 @@ class PicoStore {
       for (const store of this._stores) {
         if (typeof store.trap !== 'function') continue
         const root = this.state
-        const val = store.trap({ code, payload, block, parentBlock, state: store.value, root })
+        const val = store.trap({ code, payload, block, parentBlock, state: store.value, root, ...tags })
         if (typeof val === 'undefined') continue // undefined equals no change
         await this._commitHead(store, block.sig, val)
         modified.push(store.name)
@@ -348,3 +366,96 @@ class PicoStore {
 }
 
 module.exports = PicoStore
+
+// TODO:
+// - extract into separate package (sibling to repo)
+// - choose eviction algo (avoid ddos)
+class SparseBlockCache {
+  constructor (db) {
+    this.blocks = db.sublevel('b', {
+      keyEncoding: 'buffer',
+      valueEncoding: 'buffer'
+    })
+    this.refs = db.sublevel('r', {
+      keyEncoding: 'buffer',
+      valueEncoding: 'buffer'
+    })
+  }
+
+  async push (feed) {
+    console.log('PUSHFEED', feed.length)
+    if (feed.length === 3) debugger
+
+    if (feed.first.isGenesis) throw new Error('GenesisRefused')
+
+    const orphan = feed.first.parentSig
+    const tag = await this.refs.get(orphan).catch(ignore404)
+    // shortcut already cached identical segments
+    if (tag && tag.equals(feed.last.sig)) return
+
+    // 0 1 2 3 4 5 6 7 8 9
+    // - - - t c c c t c c
+    //             |     |
+    //
+    // Insert 7
+    // - - - t c c c c c c
+    //                   |
+    const concat = []
+    for (const block of feed.blocks()) {
+      const f = await this.pop(block.sig)
+      if (f) concat.push(f)
+    }
+    for (const f of concat) {
+      if (!feed.merge(f)) {
+        console.log('Left')
+        feed.inspect()
+        console.log('Right')
+        f.inspect()
+        debugger
+        throw new Error('CacheCorrupted')
+      }
+    }
+    for (const block of feed.blocks()) await this._writeBlock(block)
+    await this.refs.put(orphan, feed.last.sig)
+  }
+
+  async pop (parentSig) {
+    const ptr = await this.refs.get(parentSig).catch(ignore404)
+    if (!ptr) return
+    await this.refs.del(ptr)
+
+    let b = await this._readBlock(ptr)
+    const blocks = [b]
+    const batch = [{ type: 'del', key: b.sig }]
+    while ((b = await this._readBlock(b.parentSig))) {
+      blocks.push(b)
+      batch.push({ type: 'del', key: b.sig })
+    }
+    await this.blocks.batch(batch)
+    return Feed.fromBlockArray(blocks)
+  }
+
+  async _writeBlock (block) {
+    console.log('============= WRITE', block.body.toString())
+    const key = block.sig
+    const buffer = Buffer.alloc(32 + block.buffer.length)
+    block.key.copy(buffer, 0)
+    block.buffer.copy(buffer, 32)
+    await this.blocks.put(key, buffer)
+  }
+
+  async _readBlock (id) {
+    const buffer = await this.blocks.get(id).catch(ignore404)
+    if (!buffer) return
+
+    const block = Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
+    console.log('============= READ', block.body.toString())
+    return block
+  }
+
+  async _hasBlock (id) {
+    return !!(await this.readBlock(id))
+  }
+}
+
+function ignore404 (err) { if (!err.notFound) throw err }

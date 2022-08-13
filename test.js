@@ -457,6 +457,58 @@ test('Dispatching blocks one at a time', async t => {
   t.ok(l.last.sig.equals(f.last.sig), 'repo and store is in sync')
 })
 
+test.only('Out of order blocks', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+  store.mutexTimeout = 60000000
+  store.register('x', -1,
+    ({ block, state }) => {
+      const n = parseInt(block.body.toString())
+      if (state !== n - 1) return 'InvalidSequence'
+    },
+    ({ block, state }) => parseInt(block.body.toString())
+  )
+  await store.load()
+  const f = new Feed()
+  for (let i = 0; i < 10; i++) {
+    f.append(`${i}`, sk)
+  }
+
+  const slice0 = f.slice(0, 1)
+  const slice1 = f.slice(1, 2)
+  const slice2 = f.slice(2, 3)
+  const slice3 = f.slice(3, 4)
+  const slice456 = f.slice(4, 7)
+  const slice7 = f.slice(7, 8)
+  const slice89 = f.slice(8, 10)
+
+  let m = await store.dispatch(slice0)
+  t.ok(m.length)
+  m = await store.dispatch(slice2)
+  t.notOk(m.length)
+  m = await store.dispatch(slice1) // Block 1
+  t.ok(m.length, 'Blocks recovered and merged')
+  t.equal(store.state.x, 2)
+  t.ok(m.patch, 'patch exported')
+  t.equal(m.patch.length, 2)
+
+  // Next, create a gap [4,5,6, empty, 8,9]
+  m = await store.dispatch(slice456) // Blocks 4,5,6
+  t.notOk(m.length, 'blocks cached')
+
+  m = await store.dispatch(slice89) // Blocks 8,9
+  t.notOk(m.length, 'blocks cached')
+
+  m = await store.dispatch(slice7) // missing Block 7
+  t.notOk(m.length, 'blocks cached')
+
+  // Check if cache merged the gap
+  const cached = await store.cache.pop(slice3.first.sig)
+  cached.inspect()
+  t.equals(cached.first.body.toString(), slice456.first.body.toString(), 'poped starts at 4')
+  t.equals(cached.first.body.toString(), slice89.last.body.toString(), 'poped ends at 9')
+})
 /* TODO: instead of complicating PicoStore to alow multiple storages
  * i want to make an experiment using multiple PicoStores.
  */
