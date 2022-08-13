@@ -5,7 +5,7 @@ const STRUCTS = 'msgpackr::structs'
 class PicoStore {
   constructor (db, mergeStrategy) {
     this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
-    this.cache = new SparseBlockCache(db)
+    this.cache = new SparseBlockCache(this.repo._db)
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
