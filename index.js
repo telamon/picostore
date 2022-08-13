@@ -118,12 +118,11 @@ class PicoStore {
     }
 
     // Local reference point exists,
-    // attempt to extend patch using cache
+    // attempt to extend patch from blocks in cache
     for (const block of patch.blocks()) {
-      const orphan = await this.cache.pop(block.sig)
-      if (!orphan) continue
-      const m = patch.merge(orphan)
-      if (!m) throw new Error('Well this is awkward')
+      const [bwd, fwd] = await this.cache.pop(block.parentSig, block.sig)
+      if (bwd) assert(!patch.merge(bwd), 'Backward merge failed')
+      if (fwd) assert(!patch.merge(fwd), 'Forwrad merge failed')
     }
 
     // canMerge?
@@ -383,60 +382,53 @@ class SparseBlockCache {
   }
 
   async push (feed) {
-    console.log('PUSHFEED', feed.length)
-    if (feed.length === 3) debugger
-
     if (feed.first.isGenesis) throw new Error('GenesisRefused')
-
-    const orphan = feed.first.parentSig
-    const tag = await this.refs.get(orphan).catch(ignore404)
-    // shortcut already cached identical segments
-    if (tag && tag.equals(feed.last.sig)) return
-
-    // 0 1 2 3 4 5 6 7 8 9
-    // - - - t c c c t c c
-    //             |     |
-    //
-    // Insert 7
-    // - - - t c c c c c c
-    //                   |
-    const concat = []
     for (const block of feed.blocks()) {
-      const f = await this.pop(block.sig)
-      if (f) concat.push(f)
+      // Store forward ref
+      await this.refs.put(block.parentSig, block.sig)
+      await this._writeBlock(block)
     }
-    for (const f of concat) {
-      if (!feed.merge(f)) {
-        console.log('Left')
-        feed.inspect()
-        console.log('Right')
-        f.inspect()
-        debugger
-        throw new Error('CacheCorrupted')
-      }
-    }
-    for (const block of feed.blocks()) await this._writeBlock(block)
-    await this.refs.put(orphan, feed.last.sig)
   }
 
-  async pop (parentSig) {
-    const ptr = await this.refs.get(parentSig).catch(ignore404)
-    if (!ptr) return
-    await this.refs.del(ptr)
-
-    let b = await this._readBlock(ptr)
-    const blocks = [b]
-    const batch = [{ type: 'del', key: b.sig }]
-    while ((b = await this._readBlock(b.parentSig))) {
-      blocks.push(b)
-      batch.push({ type: 'del', key: b.sig })
+  async pop (backward, forward) {
+    const delRefs = []
+    const delBlocks = []
+    const segments = []
+    let next = backward
+    let blocks = []
+    // Load backwards
+    while (1) {
+      const block = await this._readBlock(next)
+      if (!block) break
+      delRefs.push(block.parentSig)
+      delBlocks.push(block.parentSig)
+      blocks.push(block)
+      next = block.parentSig
     }
-    await this.blocks.batch(batch)
-    return Feed.fromBlockArray(blocks)
+    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+
+    // Load forward
+    next = forward
+    blocks = []
+    while (1) {
+      const ptr = await this.refs.get(next).catch(ignore404)
+      if (!ptr) break
+      const block = await this._readBlock(ptr)
+      delRefs.push(ptr)
+      delBlocks.push(block.sig)
+      blocks.push(block)
+      next = block.sig
+    }
+    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+
+    await Promise.all([
+      this.blocks.batch(delBlocks.map(key => ({ type: 'del', key }))),
+      this.refs.batch(delRefs.map(key => ({ type: 'del', key })))
+    ])
+    return segments
   }
 
   async _writeBlock (block) {
-    console.log('============= WRITE', block.body.toString())
     const key = block.sig
     const buffer = Buffer.alloc(32 + block.buffer.length)
     block.key.copy(buffer, 0)
@@ -446,11 +438,7 @@ class SparseBlockCache {
 
   async _readBlock (id) {
     const buffer = await this.blocks.get(id).catch(ignore404)
-    if (!buffer) return
-
-    const block = Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
-    console.log('============= READ', block.body.toString())
-    return block
+    if (buffer) return Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
   }
 
   async _hasBlock (id) {
@@ -459,3 +447,4 @@ class SparseBlockCache {
 }
 
 function ignore404 (err) { if (!err.notFound) throw err }
+function assert (c, m) { if (c) throw new Error(m || 'AssertionError') }

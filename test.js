@@ -457,7 +457,7 @@ test('Dispatching blocks one at a time', async t => {
   t.ok(l.last.sig.equals(f.last.sig), 'repo and store is in sync')
 })
 
-test.only('Out of order blocks', async t => {
+test('Block cache solves out of order blocks', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new PicoStore(db)
@@ -504,11 +504,16 @@ test.only('Out of order blocks', async t => {
   t.notOk(m.length, 'blocks cached')
 
   // Check if cache merged the gap
-  const cached = await store.cache.pop(slice3.first.sig)
-  cached.inspect()
+  const [cached] = await store.cache.pop(slice3.first.parentSig, slice3.first.sig)
   t.equals(cached.first.body.toString(), slice456.first.body.toString(), 'poped starts at 4')
-  t.equals(cached.first.body.toString(), slice89.last.body.toString(), 'poped ends at 9')
+  t.equals(cached.last.body.toString(), slice89.last.body.toString(), 'poped ends at 9')
+
+  // Last test
+  m = await store.dispatch(cached)
+  t.notOk(m.length, 'blocks re-cached')
+  t.equal(store.state.x, 2)
+
+  m = await store.dispatch(slice3)
+  t.ok(m.length, 'blocks merged')
+  t.equal(store.state.x, 9)
 })
-/* TODO: instead of complicating PicoStore to alow multiple storages
- * i want to make an experiment using multiple PicoStores.
- */
