@@ -108,7 +108,7 @@ class PicoStore {
         : patch.first.parentSig
       local = await this.repo.resolveFeed(sig)
     } catch (err) {
-      if (err.message !== 'Unknown feed') throw err
+      if (err.message !== 'FeedNotFound') throw err
       if (patch.first.isGenesis) local = new Feed() // Happy birthday!
       else {
         await this.cache.push(patch) // Stash for later
@@ -244,7 +244,8 @@ class PicoStore {
 
     // Run all traps in signal order
     // NOTE: want to avoid reusing term 'signal' as it's a function
-    // in reducer context, candidates: code/type/event ('type' already overused)
+    // TODO: rewrite to while(interrupts.length) to let traps re-signal
+    // TODO: max-interrupts counter of 255 to throw and avoid overuse
     for (const [code, payload] of interrupts) {
       for (const store of this._stores) {
         if (typeof store.trap !== 'function') continue
@@ -310,7 +311,7 @@ class PicoStore {
         let parentBlock = null
         for (const block of part.blocks()) {
           const mods = await this._mutateState(block, parentBlock, tags, true)
-
+          // TODO: bug, reload does not persist state?
           for (const s of mods) {
             if (!~modified.indexOf(s)) modified.push(s)
           }

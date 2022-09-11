@@ -126,7 +126,6 @@ test('Buffers should not be lost during state reload', async t => {
 })
 
 test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
-  t.plan(1)
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new PicoStore(db)
@@ -138,6 +137,7 @@ test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
   mutations.append(JSON.stringify(1), sk)
   try {
     await store.dispatch(mutations, true)
+    t.fail('error not thrown')
   } catch (err) {
     t.equal(err.message, 'InvalidBlock: do not want')
   }
