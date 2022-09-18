@@ -1,36 +1,19 @@
 const PicoRepo = require('picorepo')
 const Feed = require('picofeed')
+const Cache = require('./cache.js')
 const { Packr, pack, unpack } = require('msgpackr')
 const STRUCTS = 'msgpackr::structs'
+
 class PicoStore {
   constructor (db, mergeStrategy) {
     this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
-    this.cache = new SparseBlockCache(this.repo._db)
+    this.cache = new Cache(this.repo._db)
     this._strategy = mergeStrategy || (() => {})
     this._stores = []
     this._loaded = false
-    this._mutex = Promise.resolve(0)
     this._tap = null // global sigint trap
     this._packr = null
     this.mutexTimeout = 5000
-  }
-
-  async _waitLock () {
-    const current = this._mutex
-    let release, fail
-    const next = new Promise((resolve, reject) => { release = resolve; fail = reject })
-    this._mutex = next
-    let timeoutError = null
-    try { throw new Error('MutexTimeout') } catch (err) { timeoutError = err }
-    const timerId = setTimeout(() => {
-      console.error('MutexTimeout', timeoutError.stack)
-      fail(timeoutError)
-    }, this.mutexTimeout)
-    await current
-    return () => {
-      clearTimeout(timerId)
-      release()
-    }
   }
 
   register (name, initialValue, validator, reducer, trap) {
@@ -54,31 +37,55 @@ class PicoStore {
     })
   }
 
+  async _lockRun (asyncCallback) {
+    // WebLocks API trades-off the result of locked context runs.
+    // this is a workaround for that.
+    const [p, resolve, reject] = unpromise()
+    // Generate error at callee stack
+    let timeoutError = null
+    try { throw new Error('MutexTimeout') } catch (err) { timeoutError = err }
+
+    await locks.request('default', async () => {
+      const timerId = setTimeout(() => {
+        console.error('MutexTimeout', timeoutError.stack)
+        reject(timeoutError)
+      }, this.mutexTimeout)
+
+      try {
+        const res = await asyncCallback()
+        resolve(res)
+      } catch (err) {
+        reject(err)
+      } finally { clearTimeout(timerId) }
+    }).catch(reject)
+    return p
+  }
+
   async load () {
-    const unlock = await this._waitLock()
-    if (this._loaded) throw new Error('Store already loaded')
+    await this._lockRun(async () => {
+      if (this._loaded) throw new Error('Store already loaded')
 
-    let structures = await this.repo.readReg(STRUCTS)
-    if (structures) structures = unpack(structures)
-    else structures = []
+      let structures = await this.repo.readReg(STRUCTS)
+      if (structures) structures = unpack(structures)
+      else structures = []
 
-    this._packr = new Packr({
-      structures,
-      saveStructures: () => this.repo.writeReg(STRUCTS, pack(structures))
+      this._packr = new Packr({
+        structures,
+        saveStructures: () => this.repo.writeReg(STRUCTS, pack(structures))
         // .then(console.info.bind(null, 'msgpackr:structs saved'))
-        .catch(console.error.bind(null, 'Failed saving msgpackr:structs'))
-    })
+          .catch(console.error.bind(null, 'Failed saving msgpackr:structs'))
+      })
 
-    for (const store of this._stores) {
-      const head = await this.repo.readReg(`HEADS/${store.name}`)
-      if (!head) continue // Empty
-      store.head = head
-      store.version = this._decodeValue(await this.repo.readReg(`VER/${store.name}`))
-      store.value = this._decodeValue(await this.repo.readReg(`STATES/${store.name}`))
-      for (const listener of store.observers) listener(store.value)
-    }
-    this._loaded = true
-    unlock()
+      for (const store of this._stores) {
+        const head = await this.repo.readReg(`HEADS/${store.name}`)
+        if (!head) continue // Empty
+        store.head = head
+        store.version = this._decodeValue(await this.repo.readReg(`VER/${store.name}`))
+        store.value = this._decodeValue(await this.repo.readReg(`STATES/${store.name}`))
+        for (const listener of store.observers) listener(store.value)
+      }
+      this._loaded = true
+    })
   }
 
   /**
@@ -86,15 +93,7 @@ class PicoStore {
    * for it to complete.
    */
   async dispatch (patch, loud) {
-    const unlock = await this._waitLock()
-    try { // Ensure mutex release on error
-      const res = await this._dispatch(patch, loud)
-      unlock()
-      return res
-    } catch (err) {
-      unlock()
-      throw err
-    }
+    return this._lockRun(() => this._dispatch(patch, loud))
   }
 
   async _dispatch (patch, loud = false) {
@@ -121,8 +120,8 @@ class PicoStore {
     // attempt to extend patch from blocks in cache
     for (const block of patch.blocks()) {
       const [bwd, fwd] = await this.cache.pop(block.parentSig, block.sig)
-      if (bwd) assert(!patch.merge(bwd), 'Backward merge failed')
-      if (fwd) assert(!patch.merge(fwd), 'Forwrad merge failed')
+      if (bwd) assert(patch.merge(bwd), 'Backward merge failed')
+      if (fwd) assert(patch.merge(fwd), 'Forwrad merge failed')
     }
 
     // canMerge?
@@ -290,8 +289,7 @@ class PicoStore {
    * Restores all registers to initial values and re-applies all mutations from database.
    */
   async reload () {
-    const unlock = await this._waitLock()
-    try {
+    return this._lockRun(async () => {
       const modified = []
       const feeds = await this.repo.listFeeds()
 
@@ -318,13 +316,9 @@ class PicoStore {
           parentBlock = block
         }
       }
-      unlock()
       this._notifyObservers(modified)
       return modified
-    } catch (err) {
-      unlock()
-      throw err
-    }
+    })
   }
 
   on (name, observer) {
@@ -367,85 +361,27 @@ class PicoStore {
 
 module.exports = PicoStore
 
-// TODO:
-// - extract into separate package (sibling to repo)
-// - choose eviction algo (avoid ddos)
-class SparseBlockCache {
-  constructor (db) {
-    this.blocks = db.sublevel('b', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
-    })
-    this.refs = db.sublevel('r', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
-    })
-  }
+function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
 
-  async push (feed) {
-    if (feed.first.isGenesis) throw new Error('GenesisRefused')
-    for (const block of feed.blocks()) {
-      // Store forward ref
-      await this.refs.put(block.parentSig, block.sig)
-      await this._writeBlock(block)
-    }
-  }
-
-  async pop (backward, forward) {
-    const delRefs = []
-    const delBlocks = []
-    const segments = []
-    let next = backward
-    let blocks = []
-    // Load backwards
-    while (1) {
-      const block = await this._readBlock(next)
-      if (!block) break
-      delRefs.push(block.parentSig)
-      delBlocks.push(block.parentSig)
-      blocks.push(block)
-      next = block.parentSig
-    }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
-
-    // Load forward
-    next = forward
-    blocks = []
-    while (1) {
-      const ptr = await this.refs.get(next).catch(ignore404)
-      if (!ptr) break
-      const block = await this._readBlock(ptr)
-      delRefs.push(ptr)
-      delBlocks.push(block.sig)
-      blocks.push(block)
-      next = block.sig
-    }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
-
-    await Promise.all([
-      this.blocks.batch(delBlocks.map(key => ({ type: 'del', key }))),
-      this.refs.batch(delRefs.map(key => ({ type: 'del', key })))
-    ])
-    return segments
-  }
-
-  async _writeBlock (block) {
-    const key = block.sig
-    const buffer = Buffer.alloc(32 + block.buffer.length)
-    block.key.copy(buffer, 0)
-    block.buffer.copy(buffer, 32)
-    await this.blocks.put(key, buffer)
-  }
-
-  async _readBlock (id) {
-    const buffer = await this.blocks.get(id).catch(ignore404)
-    if (buffer) return Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
-  }
-
-  async _hasBlock (id) {
-    return !!(await this.readBlock(id))
+// Weblocks shim
+const locks = (
+  typeof window !== 'undefined' &&
+  window.navigator?.locks
+) || {
+  resources: {},
+  async request (resource, options, handler) {
+    const resources = locks.resources
+    if (!resources[resource]) resources[resource] = Promise.resolve()
+    const prev = resources[resource]
+    resources[resource] = prev
+      .catch(err => console.warn('Previous lock unlocked with error', err))
+      .then(() => (handler || options)())
+    await prev
   }
 }
 
-function ignore404 (err) { if (!err.notFound) throw err }
-function assert (c, m) { if (c) throw new Error(m || 'AssertionError') }
+function unpromise () {
+  let solve, eject
+  const p = new Promise((resolve, reject) => { solve = resolve; eject = reject })
+  return [p, solve, eject]
+}

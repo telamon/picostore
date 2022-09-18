@@ -517,3 +517,72 @@ test('Block cache solves out of order blocks', async t => {
   t.ok(m.length, 'blocks merged')
   t.equal(store.state.x, 9)
 })
+
+test.skip('Simple stupid slice with manual garbage collection', async t => {
+  const store = new PicoStore(DB())
+  store.repo.allowDetached = true
+  store.register(CulledClock())
+  await store.load()
+  // Identities
+  const { sk: A } = Feed.signPair()
+  const { sk: B } = Feed.signPair()
+  const { sk: C } = Feed.signPair()
+  // Feeds/Chains
+  const a = new Feed()
+  const b = new Feed()
+  const c = new Feed()
+
+  // Consensus; expunge ticks where tick < avg(ticks) - 5
+  a.append('' + 0, A)
+  a.append('' + 1, A)
+  a.append('' + 2, A)
+
+  await store.dispatch(a, true)
+
+  t.equal(Object.keys(store.state.clock.peers).length, 1, 'PeerA ticks')
+  t.equal(store.state.clock.t, 2, 'time = PeerA')
+  b.append('' + 3, B)
+  c.append('' + 5, C)
+
+  await store.dispatch(b, true)
+  await store.dispatch(c, true)
+  t.equal(Object.keys(store.state.clock.peers).length, 3, 'Peer A,B,C ticks')
+  t.equal(store.state.clock.t, (2 + 3 + 5) / 3, 'Time avg(a,b,c)')
+
+  b.append('' + 9, B)
+  await store.dispatch(b, true)
+  await store.gc(store.state.clock.t)
+
+  t.equal(Object.keys(store.state.clock.peers).length, 2, 'Peer A removed/timeout')
+  t.equal(store.state.clock.t, (9 + 5) / 2, 'Time avg(b,c)')
+
+  function CulledClock () {
+    return {
+      name: 'clock',
+      initialValue: { t: 0, peers: {} },
+      filter ({ CHAIN, state, block }) {
+        const n = parseInt(block.body.toString())
+        const key = CHAIN.hexSlice(0, 6)
+        if (state.peers[key] && !(state.peers[key] < n)) return 'InvalidTime'
+        // TODO: only check this on last-block of a chain to allow
+        // a long lived chain to be merged on new peers.
+        if (!(state.t <= n)) return 'ThePast'
+
+        return false
+      },
+      reducer ({ CHAIN, state, block, trash }) {
+        const n = parseInt(block.body.toString())
+        const key = CHAIN.hexSlice(0, 6)
+        state.peers[key] = n
+        const vector = Object.values(state.peers)
+        // trash(key, n + 5) // Schedule removal
+        state.t = vector.reduce((sum, i) => sum + i, 0) / vector.length
+        return state
+      },
+
+      sweep ({ now, drop, payload }) {
+        debugger
+      }
+    }
+  }
+})
