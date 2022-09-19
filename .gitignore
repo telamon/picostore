@@ -6,5 +6,6 @@
 !index.js
 !test.js
 !cache.js
+!gc.js
 !.editorconfig
 !.gitignore

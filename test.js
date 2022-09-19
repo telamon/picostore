@@ -518,11 +518,13 @@ test('Block cache solves out of order blocks', async t => {
   t.equal(store.state.x, 9)
 })
 
-test.skip('Simple stupid slice with manual garbage collection', async t => {
+test('Simple stupid slice with crude manual boring garbage collection', async t => {
   const store = new PicoStore(DB())
   store.repo.allowDetached = true
   store.register(CulledClock())
   await store.load()
+  // store.$('clock')(state => store.gc(state.t)) // Automatic GC on mutate
+
   // Identities
   const { sk: A } = Feed.signPair()
   const { sk: B } = Feed.signPair()
@@ -556,7 +558,11 @@ test.skip('Simple stupid slice with manual garbage collection', async t => {
   t.equal(Object.keys(store.state.clock.peers).length, 2, 'Peer A removed/timeout')
   t.equal(store.state.clock.t, (9 + 5) / 2, 'Time avg(b,c)')
 
+  /**
+   * A vector clock that does not care
+   */
   function CulledClock () {
+    const TTL = 5
     return {
       name: 'clock',
       initialValue: { t: 0, peers: {} },
@@ -566,22 +572,31 @@ test.skip('Simple stupid slice with manual garbage collection', async t => {
         if (state.peers[key] && !(state.peers[key] < n)) return 'InvalidTime'
         // TODO: only check this on last-block of a chain to allow
         // a long lived chain to be merged on new peers.
+        // (Extend filter-ctx with isLast and invalidatePrevious/abort())
         if (!(state.t <= n)) return 'ThePast'
-
         return false
       },
-      reducer ({ CHAIN, state, block, trash }) {
+      reducer ({ CHAIN, state, block, mark }) {
         const n = parseInt(block.body.toString())
         const key = CHAIN.hexSlice(0, 6)
         state.peers[key] = n
         const vector = Object.values(state.peers)
-        // trash(key, n + 5) // Schedule removal
+        mark(key, n + TTL) // Schedule removal
         state.t = vector.reduce((sum, i) => sum + i, 0) / vector.length
         return state
       },
-
-      sweep ({ now, drop, payload }) {
-        debugger
+      sweep ({ now, drop, payload: peer, state, mark }) {
+        if (state.peers[peer] >= state.t) {
+          // Peer still lives; Re-queue
+          mark(peer, state.peers[peer] + TTL)
+          return // state not changed
+        }
+        drop() // Drop entire chain (no stop-block provided)
+        delete state.peers[peer] // clear out state
+        // recalculate time
+        const vector = Object.values(state.peers)
+        state.t = vector.reduce((sum, i) => sum + i, 0) / vector.length
+        return state // Notify subscribers that state changed.
       }
     }
   }

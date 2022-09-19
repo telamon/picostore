@@ -4,21 +4,22 @@
 
 > Magical redux-like state handler using picofeed blockchains
 
-PicoStore - picofeed powered blockchain state reducer (blockend)
+`TODO: rewrite this section/ entire readme`
+
+PicoStore - picofeed powered blockchain state reducer (blockend-toolkit)
 Compatible with what ever frontend framework you wish to use.
 
 The reduced state is always persisted and consistent across reloads and
 application restarts. (Automagically restores in-memory state from cold-storage)
 
 Works in browser and nodejs using leveldb and IndexedDB. (levelup)
-Use `memdown` in unit-tests.
+Use `MemoryLevel` in unit-tests.
 
 ## Use
 
 ```bash
-$ npm install @telamon/picostore levelup
+$ npm i @telamon/picostore browser-level
 ```
-
 
 ```js
 // Initialize a new store using
@@ -101,7 +102,9 @@ function ListPostsComponent() {
   </ul>)
 }
 ```
+## API
 
+TODO:
 
 ## Ad
 
@@ -129,12 +132,23 @@ effort and time.
 
 ## Changelog
 
-### [1.0.0] first release
+### [2.0.0] - 2022-10-19
+- WeblocksAPI
+- internal serializer changed to [msgpackr]()
+- added OOOB cache
+- Exposed tags AUTHOR & CHAIN on public api's
+- memdown devDep replaced with MemoryLevel
+- signal() & trap() api
+- craploads of bugfixes
+
+
 ### [1.3.0] - 2021-10-29
 - added `parentBlock` to validator & reducer interface
 - added `dispatch(feed, loudFail = false)` setting to true will throw on validation error
 - changed returning `true` within a validator silently ignores block even with loudFail active
 - fixed craploads of bugs
+
+### [1.0.0] first release
 
 ## Contributing
 

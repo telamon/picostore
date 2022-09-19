@@ -1,6 +1,7 @@
 const PicoRepo = require('picorepo')
 const Feed = require('picofeed')
 const Cache = require('./cache.js')
+const GarbageCollector = require('./gc.js')
 const { Packr, pack, unpack } = require('msgpackr')
 const STRUCTS = 'msgpackr::structs'
 
@@ -16,10 +17,10 @@ class PicoStore {
     this.mutexTimeout = 5000
   }
 
-  register (name, initialValue, validator, reducer, trap) {
+  register (name, initialValue, validator, reducer, trap, sweep) {
     if (this._loaded) throw new Error('register() must be invoked before load()')
     if (typeof name !== 'string') {
-      return this.register(name.name, name.initialValue, name.filter, name.reducer, name.trap)
+      return this.register(name.name, name.initialValue, name.filter, name.reducer, name.trap, name.sweep)
     } else if (typeof initialValue === 'function') {
       return this.register(name, undefined, initialValue, validator)
     }
@@ -29,6 +30,7 @@ class PicoStore {
       validator,
       reducer,
       trap,
+      sweep,
       version: 0,
       head: undefined,
       value: initialValue,
@@ -75,6 +77,8 @@ class PicoStore {
         // .then(console.info.bind(null, 'msgpackr:structs saved'))
           .catch(console.error.bind(null, 'Failed saving msgpackr:structs'))
       })
+
+      this._gc = new GarbageCollector(this.repo, this._packr)
 
       for (const store of this._stores) {
         const head = await this.repo.readReg(`HEADS/${store.name}`)
@@ -131,12 +135,13 @@ class PicoStore {
     }
 
     // Extract tags (used by application to keep track of objects)
-    const tags = {}
+    const tags = {
+    }
     if (local.first?.isGenesis) {
-      tags.HEAD = local.first.key
+      tags.AUTHOR = local.first.key
       tags.CHAIN = local.first.sig
     } else if (!local.length && patch.first.isGenesis) {
-      tags.HEAD = patch.first.key
+      tags.AUTHOR = patch.first.key
       tags.CHAIN = patch.first.sig
     }
 
@@ -234,8 +239,22 @@ class PicoStore {
     // Run all state reducers
     for (const store of stores) {
       // If repo accepted the change, apply it
+      const mark = (payload, date) => this._gc.schedule(store.name, tags, block, payload, date)
       const root = this.state
-      const val = store.reducer({ block, parentBlock, state: store.value, root, signal, ...tags })
+      const context = {
+        // blocks
+        block,
+        parentBlock,
+        // AUTHOR & CHAIN
+        ...tags,
+        // state
+        state: store.value,
+        root,
+        // helpers
+        signal,
+        mark
+      }
+      const val = store.reducer(context)
       if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
       await this._commitHead(store, block.sig, val)
       modified.push(store.name)
@@ -303,7 +322,7 @@ class PicoStore {
       for (const { key: ptr, value: CHAIN } of feeds) {
         const part = await this.repo.loadFeed(ptr)
         const tags = {
-          HEAD: part.first.key,
+          AUTHOR: part.first.key,
           CHAIN
         }
         let parentBlock = null
@@ -320,6 +339,9 @@ class PicoStore {
       return modified
     })
   }
+
+  // Nuro Shortcut
+  $ (name) { return sub => this.on(name, sub) }
 
   on (name, observer) {
     const store = this._stores.find(s => s.name === name)
@@ -356,6 +378,12 @@ class PicoStore {
 
   _encodeValue (obj) {
     return this._packr.pack(obj)
+  }
+
+  async gc (now) {
+    const { mutated, evicted } = await this._gc.collectGarbage(now, this)
+    this._notifyObservers(mutated)
+    return evicted
   }
 }
 
