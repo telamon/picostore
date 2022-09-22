@@ -21,14 +21,14 @@
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
     "memory-level": "^1.0.0",
-    "msgpackr": "^1.7.0-beta1",
-    "picofeed": "^3.4.0",
-    "picorepo": "^1.4.4",
+    "msgpackr": "^1.7.0",
+    "picofeed": "^3.4.1",
+    "picorepo": "^1.4.5",
     "standard": "^17.0.0",
-    "tape": "^5.6.0"
+    "tape": "^5.6.1"
   },
   "peerDependencies": {
-    "picofeed": "^3.4.0",
-    "picorepo": "^1.4.4"
+    "picofeed": "^3.4.1",
+    "picorepo": "^1.4.5"
   }
 }

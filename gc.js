@@ -126,10 +126,14 @@ class GarbageCollector { // What's left is the scheduler
 function mkKey (date, slice = '', sig = '') {
   // return `${date}${slice}${sig.slice(0, 6).toString('hex')}`
   if (sig?.length) sig = sig.slice(0, 6)
-  const b = Buffer.allocUnsafe(8 + slice.length + sig.length)
-  b.writeBigUInt64BE(BigInt(date), 0)
-  for (let i = 0; i < slice.length; i++) b[8 + i] = slice.charCodeAt(i)
-  for (let i = 0; i < sig.length; i++) b[8 + slice.length + i] = sig[i]
+  const d = 20 // date size
+  const b = Buffer.allocUnsafe(d + slice.length + sig.length)
+  date = (date + '').padStart(d, 0) // Workaround
+  for (let i = 0; i < d; i++) b[i] = date[i]
+  // SpaceEfficient + Lookups but not supported by all Buffer shims
+  // b.writeBigUInt64BE(BigInt(date), 0) // Writes 8-bytes
+  for (let i = 0; i < slice.length; i++) b[d + i] = slice.charCodeAt(i)
+  for (let i = 0; i < sig.length; i++) b[d + slice.length + i] = sig[i]
   return b
 }
 
