@@ -35,19 +35,6 @@ class GarbageCollector { // What's left is the scheduler
       .catch(error => console.error('Failed queing GC: ', error))
   }
 
-  // TODO: move to index.js
-  start (interval = 3 * 1000) {
-    if (this.intervalId) return
-    this.intervalId = setInterval(this._collectGarbage.bind(this), interval)
-  }
-
-  // TODO move to index.js
-  stop () {
-    if (!this.intervalId) return
-    clearInterval(this.intervalId)
-    this.intervalId = null
-  }
-
   async tickQuery (now) {
     const query = {
       gt: mkKey(0),

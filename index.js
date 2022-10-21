@@ -385,6 +385,17 @@ class PicoStore {
     this._notifyObservers(mutated)
     return evicted
   }
+
+  gcStart (interval = 3 * 1000) {
+    if (this.intervalId) return
+    this.intervalId = setInterval(this._gc.collectGarbage.bind(this), interval)
+  }
+
+  gcStop () {
+    if (!this.intervalId) return
+    clearInterval(this.intervalId)
+    this.intervalId = null
+  }
 }
 
 module.exports = PicoStore
