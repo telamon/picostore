@@ -15,6 +15,10 @@ class GarbageCollector { // What's left is the scheduler
   }
 
   /**
+   * setTimemout over LevelDB
+   * Schedules an event to be triggered on next sweep.
+   * Used by 'mark()'-function to mark objects that should be removed.
+   *
    * @param payload {Object} A state reference to check.
    * @param date {Number} When to run the check next time default to next run.
    */
@@ -37,10 +41,10 @@ class GarbageCollector { // What's left is the scheduler
 
   async tickQuery (now) {
     const query = {
-      gt: mkKey(0),
-      lt: mkKey(now)
+      gt: Buffer.alloc(9), // All zeroes
+      lt: mkKey(now, 0xff)
     }
-    D('sweep', query.lt.toString('hex'))
+    D('sweep range:', query.gt.toString('hex'), '...', query.lt.toString('hex'))
     const iter = this.db.iterator(query)
     const result = []
     const batch = []
@@ -113,19 +117,36 @@ class GarbageCollector { // What's left is the scheduler
   }
 }
 
-let __taskCounter = 0
+let _ctr = 0
+let _lastDate = 0
 /**
  * Creates a binary LevelDB key indexes tasks by
  * Timestamp.
- * @param {Number} date Timestamp
+ * @param {number} date Timestamp
+ * @return {Buffer<9>} a 9-byte binary key
  */
-function mkKey (date) {
-  __taskCounter = ++__taskCounter % 1000
-  // 20bytes+ workaround (who cares.. :( )
-  const str = `${date}`.padStart(20, 0) + __taskCounter
-  return Buffer.from(str.split(''))
-  // SpaceEfficient + Lookups but not supported by all Buffer shims
+function mkKey (date, counter) {
+  // SpaceEfficient + FastLookups not supported by all Buffer shims
   // b.writeBigUInt64BE(BigInt(date), 0) // Writes 8-bytes
+
+  // Manually writeBigUInt64BE
+  const b = Buffer.alloc(9)
+  for (let i = 0; i < 8; i++) {
+    b[i] = Number((BigInt(date) >> BigInt((7 - i) * 8)) & BigInt(255))
+  }
+
+  if (counter ?? false) b[8] = counter
+  else {
+    // Automatic counter '_ctr' prevents task-overwrites
+    // when mkKey invoked within same millisecond.
+    if (date === _lastDate) _ctr++
+    else _ctr = 0
+    _lastDate = date
+    if (_ctr > 255) console.warn('Warning: >255 GC-tasks enqueued, systemfault?')
+    b[8] = _ctr % 256
+  }
+
+  return b
 }
 
 module.exports = GarbageCollector

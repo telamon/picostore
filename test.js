@@ -553,7 +553,8 @@ test('Simple stupid slice with crude manual boring garbage collection', async t 
 
   b.append('' + 9, B)
   await store.dispatch(b, true)
-  await store.gc(store.state.clock.t)
+  const dropped = await store.gc(store.state.clock.t)
+  t.equal(dropped.length, 1, '1 chain removed')
 
   t.equal(Object.keys(store.state.clock.peers).length, 2, 'Peer A removed/timeout')
   t.equal(store.state.clock.t, (9 + 5) / 2, 'Time avg(b,c)')
