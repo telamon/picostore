@@ -24,7 +24,6 @@ class GarbageCollector { // What's left is the scheduler
    */
   schedule (slice, tags, block, payload, date = Date.now()) {
     if (!payload) throw new Error('PayloadExpected')
-    date = date | 0 // Floor floats
     const sig = block.sig
     const memo = this.packr.pack({
       slice,
