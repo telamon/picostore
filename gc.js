@@ -29,17 +29,19 @@ class GarbageCollector { // What's left is the scheduler
       tags,
       date
     })
-    const key = mkKey(date, slice, sig)
-    // console.info('Scheduing removal', type, new Date(date))
+    const key = mkKey(date)
+    D('mark', new Date(date), 'key:', key.toString('hex'), 'payload:', payload)
     this.db.put(key, memo)
       .catch(error => console.error('Failed queing GC: ', error))
   }
 
+  // TODO: move to index.js
   start (interval = 3 * 1000) {
     if (this.intervalId) return
     this.intervalId = setInterval(this._collectGarbage.bind(this), interval)
   }
 
+  // TODO move to index.js
   stop () {
     if (!this.intervalId) return
     clearInterval(this.intervalId)
@@ -49,8 +51,9 @@ class GarbageCollector { // What's left is the scheduler
   async tickQuery (now) {
     const query = {
       gt: mkKey(0),
-      lt: mkKey(now, '', Buffer.allocUnsafe(5).fill(0xff))
+      lt: mkKey(now)
     }
+    D('sweep', query.lt.toString('hex'))
     const iter = this.db.iterator(query)
     const result = []
     const batch = []
@@ -123,18 +126,19 @@ class GarbageCollector { // What's left is the scheduler
   }
 }
 
-function mkKey (date, slice = '', sig = '') {
-  // return `${date}${slice}${sig.slice(0, 6).toString('hex')}`
-  if (sig?.length) sig = sig.slice(0, 6)
-  const d = 20 // date size
-  const b = Buffer.allocUnsafe(d + slice.length + sig.length)
-  date = (date + '').padStart(d, 0) // Workaround
-  for (let i = 0; i < d; i++) b[i] = date[i]
+let __taskCounter = 0
+/**
+ * Creates a binary LevelDB key indexes tasks by
+ * Timestamp.
+ * @param {Number} date Timestamp
+ */
+function mkKey (date) {
+  __taskCounter = ++__taskCounter % 1000
+  // 20bytes+ workaround (who cares.. :( )
+  const str = `${date}`.padStart(20, 0) + __taskCounter
+  return Buffer.from(str.split(''))
   // SpaceEfficient + Lookups but not supported by all Buffer shims
   // b.writeBigUInt64BE(BigInt(date), 0) // Writes 8-bytes
-  for (let i = 0; i < slice.length; i++) b[d + i] = slice.charCodeAt(i)
-  for (let i = 0; i < sig.length; i++) b[d + slice.length + i] = sig[i]
-  return b
 }
 
 module.exports = GarbageCollector
