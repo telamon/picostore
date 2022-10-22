@@ -61,6 +61,7 @@ class GarbageCollector { // What's left is the scheduler
 
   async collectGarbage (now = Date.now(), picoStore) {
     D('Starting collecting garbage...')
+    now = Math.floor(now) // Floor floats
     const pending = await this.tickQuery(now)
 
     D('Fetched pending from store:', pending.length)
