@@ -1,8 +1,8 @@
-const Feed = require('picofeed')
+import { Feed, b2h as toHex } from 'picofeed'
 // TODO:
 // - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)
-class SparseBlockCache {
+export default class MemPool {
   constructor (db) {
     this.blocks = db.sublevel('b', {
       keyEncoding: 'buffer',
@@ -16,9 +16,9 @@ class SparseBlockCache {
 
   async push (feed) {
     if (feed.first.isGenesis) throw new Error('GenesisRefused')
-    for (const block of feed.blocks()) {
+    for (const block of feed.blocks) {
       // Store forward ref
-      await this.refs.put(block.parentSig, block.sig)
+      await this.refs.put(block.psig, block.sig)
       await this._writeBlock(block)
     }
   }
@@ -63,9 +63,9 @@ class SparseBlockCache {
 
   async _writeBlock (block) {
     const key = block.sig
-    const buffer = Buffer.alloc(32 + block.buffer.length)
-    block.key.copy(buffer, 0)
-    block.buffer.copy(buffer, 32)
+    const buffer = new Uint8Array(32 + block.buffer.length)
+    buffer.set(block.key)
+    buffer.set(block.buffer, 32)
     await this.blocks.put(key, buffer)
   }
 
@@ -80,5 +80,3 @@ class SparseBlockCache {
 }
 
 function ignore404 (err) { if (!err.notFound) throw err }
-
-module.exports = SparseBlockCache

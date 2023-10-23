@@ -1,22 +1,103 @@
-const PicoRepo = require('picorepo')
-const Feed = require('picofeed')
-const Cache = require('./cache.js')
-const GarbageCollector = require('./gc.js')
-const { Packr, pack, unpack } = require('msgpackr')
-const STRUCTS = 'msgpackr::structs'
+import { Repo } from 'picorepo'
+import { Feed, getPublicKey } from 'picofeed'
+import { init, get } from 'piconuro'
+import Cache from './cache.js'
+import GarbageCollector from './gc.js'
+import { Packr, pack, unpack } from 'msgpackr'
+const STRUCTS = new Uint8Array([0xFE,0xED])
 
-class PicoStore {
+/** @typedef {string} hexstring */
+/** @typedef {hexstring} Author */
+/** @typedef {hexstring} Chain */
+/** @typedef {Author|Chain} RootID */
+/** @typedef {import('picofeed').SecretKey} SecretKey */
+/** @typedef {
+  initialValue?: any,
+  id: () => hexstring|number,
+  validate: () => string?,
+  expiresAt: () => number
+} CollectionSpec */
+
+class Collection {
+  #keyspace = 0 // 0: Author, 1: Chain ID, -1: Singularity/Monochain
+  /**
+   * @param {Store} store
+   * @param {string} name
+   * @param {CollectionSpec} config
+   */
+  constructor (store, name, config = {}) {
+    this.store = store
+    this.name = name
+    this.config = config
+    this.state = {}
+  }
+
+  /**
+   * Mutates the decentralized state of this collection.
+   * @param {RootID?} rootId Item identified by chain or author
+   * @param {(value, MutationContext) => value} mutFn
+   * @param {SecretKey} secret Signing secret
+   */
+  async mutate (rootId, mutFn, secret) {
+    // const author = getPublicKey(secret)
+    const blockRoot = rootId ? await this.readBranch(rootId) : new Feed()
+    const oValue = rootId ? await this.readState(rootId) : this.config.initialValue
+    const nValue = mutFn(Object.freeze(oValue), {})
+    const diff = formatPatch(oValue, nValue)
+    blockRoot.append(pack({ root: this.name, diff }), secret)
+    return await this.store.dispatch(blockRoot)
+  }
+
+  async readState (id) {
+    return this.state[id] || this.config.initialValue
+  }
+
+  /** @param {RootID} id */
+  async readBranch (id) {
+    if (this.#keyspace) return this.store.repo.loadFeed(id)
+    else return this.store.repo.loadHead(id)
+  }
+
+  async _validate (ctx) {
+    const {
+      data,
+      block,
+      parentBlock,
+      AUTHOR,
+      CHAIN
+    } = ctx
+    debugger
+  }
+}
+
+export default class Store {
   constructor (db, mergeStrategy) {
-    this.repo = PicoRepo.isRepo(db) ? db : new PicoRepo(db)
+    this.repo = Repo.isRepo(db) ? db : new Repo(db)
     this.cache = new Cache(this.repo._db)
     this._strategy = mergeStrategy || (() => {})
-    this._stores = []
+    // this._stores = []
+    this.roots = {}
     this._loaded = false
     this._tap = null // global sigint trap
     this._packr = null
     this.mutexTimeout = 5000
+    this._collections = {}
   }
 
+  /**
+   * Initializes a collection decentralized state
+   * @param {string} name The name of the collection
+   * @param {CollectionSpec} config collection configuration
+   */
+  spec (name, config) {
+    if (config && this._loaded) throw new Error('Hotconf not supported')
+    console.log('spec()', name, config)
+    const c = new Collection(this, name, config)
+    this.roots[name] = c
+    return c
+  }
+
+  /*
   register (name, initialValue, validator, reducer, trap, sweep) {
     if (this._loaded) throw new Error('register() must be invoked before load()')
     if (typeof name !== 'string') {
@@ -38,6 +119,7 @@ class PicoStore {
       observers: new Set()
     })
   }
+  */
 
   async _lockRun (asyncCallback) {
     // WebLocks API trades-off the result of locked context runs.
@@ -79,7 +161,7 @@ class PicoStore {
       })
 
       this._gc = new GarbageCollector(this.repo, this._packr)
-
+      /* TODO: Rewrite to roots
       for (const store of this._stores) {
         const head = await this.repo.readReg(`HEADS/${store.name}`)
         if (!head) continue // Empty
@@ -88,6 +170,7 @@ class PicoStore {
         store.value = this._decodeValue(await this.repo.readReg(`STATES/${store.name}`))
         for (const listener of store.observers) listener(store.value)
       }
+      */
       this._loaded = true
     })
   }
@@ -102,17 +185,17 @@ class PicoStore {
 
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
+    /// align + grow blockroots
     patch = Feed.from(patch)
-
     let local = null // Target branch to merge to
     try {
-      const sig = patch.first.isGenesis
+      const sig = patch.first.genesis
         ? patch.first.sig
-        : patch.first.parentSig
+        : patch.first.psig
       local = await this.repo.resolveFeed(sig)
     } catch (err) {
       if (err.message !== 'FeedNotFound') throw err
-      if (patch.first.isGenesis) local = new Feed() // Happy birthday!
+      if (patch.first.genesis) local = new Feed() // Happy birthday!
       else {
         await this.cache.push(patch) // Stash for later
         // throw new Error('UnknownTargetBranch')
@@ -122,8 +205,8 @@ class PicoStore {
 
     // Local reference point exists,
     // attempt to extend patch from blocks in cache
-    for (const block of patch.blocks()) {
-      const [bwd, fwd] = await this.cache.pop(block.parentSig, block.sig)
+    for (const block of patch.blocks) {
+      const [bwd, fwd] = await this.cache.pop(block.psig, block.sig)
       if (bwd) assert(patch.merge(bwd), 'Backward merge failed')
       if (fwd) assert(patch.merge(fwd), 'Forwrad merge failed')
     }
@@ -135,12 +218,11 @@ class PicoStore {
     }
 
     // Extract tags (used by application to keep track of objects)
-    const tags = {
-    }
-    if (local.first?.isGenesis) {
+    const tags = {}
+    if (local.first?.genesis) {
       tags.AUTHOR = local.first.key
       tags.CHAIN = local.first.sig
-    } else if (!local.length && patch.first.isGenesis) {
+    } else if (!local.length && patch.first.genesis) {
       tags.AUTHOR = patch.first.key
       tags.CHAIN = patch.first.sig
     }
@@ -148,65 +230,48 @@ class PicoStore {
     const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
     if (diff < 1) return [] // Patch contains equal or less blocks than local
 
-    const modified = new Set()
-    const root = this.state
-
     let parentBlock = null
-    const _first = patch.get(-diff)
-    if (!_first.isGenesis && !local.length) {
+    const _first = patch.blocks[patch.blocks.length - diff]
+    if (!_first.genesis && !local.length) {
       if (loud) throw new Error('NoCommonParent')
       return []
-    } else if (!_first.isGenesis && local.length) {
-      const it = local.blocks()
+    } else if (!_first.genesis && local.length) {
+      const it = local.blocks[Symbol.iterator]()
       let res = it.next()
       while (!parentBlock && !res.done) { // TODO: avoid loop using local.get(something)
-        if (res.value.sig.equals(_first.parentSig)) parentBlock = res.value
+        if (res.value.sig.equals(_first.psig)) parentBlock = res.value
         res = it.next()
       }
       if (!parentBlock) {
         throw new Error('ParentNotFound') // real logical error
       }
     }
+
+    /// Merge DSTATE-roots
     let nMerged = 0
-    for (const block of patch.blocks(-diff)) {
-      const accepted = []
-      for (const store of this._stores) {
-        if (typeof store.validator !== 'function') continue
-        let validationError = store.validator({
-          block,
-          parentBlock,
-          state: store.value,
-          root,
-          ...tags
-        })
+    const modified = new Set()
+    for (const block of patch.blocks.slice(-diff)) {
+      const data = unpack(block.body) // Support multi-root blocks?
+      const collection = this.roots[data.root]
+      if (!collection) throw new Error('UnknownCollection' + data.root)
+      const validationError = await collection._validate({
+        data,
+        block,
+        parentBlock,
+        ...tags
+      })
 
-        if (!validationError) accepted.push(store) // no error, proceed.
-        else if (validationError === true) {
-          // NO-OP
-          // Returning 'true' from a validator explicitly means silent ignore.
-        } else if (loud) { // throw validation errors
-          if (typeof validationError === 'string') validationError = new Error(`InvalidBlock: ${validationError}`)
-          throw validationError
-        }
-      }
-      if (!accepted.length) break // reject rest of chain if block not accepted
-      const mod = await this._mutateState(block, parentBlock, tags, false, loud)
+      // Abort merging
+      if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
+      else if (validationError === true) return patch.slice(-diff, -diff + nMerged)
 
-      for (const s of mod) modified.add(s)
+      // Mutate state
+      await collection._mutateState(block, parentBlock, tags, false, loud)
       parentBlock = block
       nMerged++
     }
     this._notifyObservers(modified)
-
-    // TODO: Clean this up, patch needs
-    // to be exported to RPC for transmission
-    const m = Array.from(modified)
-    Object.defineProperty(m, 'patch', {
-      enumerable: false,
-      get () { return patch.slice(-diff, -diff + nMerged) }
-    })
-
-    return m
+    return patch.slice(-diff, -diff + nMerged)
   }
 
   async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
@@ -354,6 +419,7 @@ class PicoStore {
   }
 
   /**
+   * TODO: remove
    * Hotswaps data-storage immediately reloading store from given bucket
    * and destroying previous database deleting all values in the background
    * to free up memory in storage.
@@ -398,8 +464,6 @@ class PicoStore {
   }
 }
 
-module.exports = PicoStore
-
 function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
 
 // Weblocks shim
@@ -423,4 +487,22 @@ function unpromise () {
   let solve, eject
   const p = new Promise((resolve, reject) => { solve = resolve; eject = reject })
   return [p, solve, eject]
+}
+
+// Experimental
+function formatPatch (a, b) {
+  if (typeof a === 'undefined') return b
+  if (typeof a !== typeof b) throw new Error('Dynamic typeswitching not supported')
+  const type = typeof a
+  switch (type) {
+    case 'number': return b - a
+    case 'object': {
+      const out = { ...a }
+      for (const k in b) out[k] = formatPatch(a[k], b[k])
+      return out
+    }
+    default:
+      console.warn('diff: Unhandled type', type, a, b)
+      return b
+  }
 }

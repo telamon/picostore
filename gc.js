@@ -1,8 +1,9 @@
-const D = require('debug')('pico:gc')
+import debug from 'debug'
+const D = debug('pico:gc')
 // const { pack, unpack } = require('msgpackr')
 const REG_TIMER = 'GCt' // magic // can be replaced with sublvl
 
-class GarbageCollector { // What's left is the scheduler
+export default class GarbageCollector { // What's left is the scheduler
   intervalId = null
   constructor (repo, packr) {
     this.packr = packr // || { pack, unpack }
@@ -147,5 +148,3 @@ function mkKey (date, counter) {
 
   return b
 }
-
-module.exports = GarbageCollector

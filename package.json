@@ -3,10 +3,11 @@
   "version": "2.0.6",
   "description": "Magical redux-like state handler using picofeed blockchains",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "lint": "standard",
     "test": "tape test.js",
-    "debug": "node inspect $(npm bin)/tape test.js",
+    "debug": "node inspect test.js",
     "prepublishOnly": "standard && npm test"
   },
   "repository": {
@@ -21,11 +22,12 @@
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
     "memory-level": "^1.0.0",
-    "msgpackr": "^1.7.0",
-    "picofeed": "^3.4.1",
-    "picorepo": "^1.4.5",
-    "standard": "^17.0.0",
-    "tape": "^5.6.1"
+    "msgpackr": "^1.9.9",
+    "picofeed": "^4.1.0",
+    "piconuro": "^1.0.1",
+    "picorepo": "^2.0.3",
+    "standard": "^17.1.0",
+    "tape": "^5.7.1"
   },
   "peerDependencies": {
     "picofeed": "^3.4.1",

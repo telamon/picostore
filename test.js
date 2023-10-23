@@ -1,10 +1,31 @@
-const test = require('tape')
-const Feed = require('picofeed')
-const { MemoryLevel } = require('memory-level')
-const PicoStore = require('.')
+import test from 'tape'
+import { Feed } from 'picofeed'
+import { MemoryLevel } from 'memory-level'
+import { get } from 'piconuro'
+import Store from './index.js'
+
 const DB = () => new MemoryLevel({
   valueEncoding: 'buffer',
   keyEncoding: 'buffer'
+})
+
+test.only('PicoStore 3.x', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new Store(db)
+  const collection = store.spec('profiles', {
+    initialValue: 0,
+    id: () => 0, // AuthorPK|ChainID|BlockID|ArbitraryNumber
+    validate: block => {}, // ErrorMSG|void
+    expiresAt: block => {} // uint48|falsy=expired
+  })
+  await store.load()
+
+  let v = await collection.readState(0)
+  t.equal(v, 0) // Singular states are the exception
+  const blocks = await collection.mutate(null, state => 4, sk)
+  v = await collection.readState(0)
+  t.equal(v, 4) // Singular states are the exception
 })
 
 test('PicoStore', async t => {
