@@ -1,5 +1,5 @@
 import { Repo } from 'picorepo'
-import { Feed, getPublicKey } from 'picofeed'
+import { Feed, getPublicKey, b2h as toHex } from 'picofeed'
 import { init, get } from 'piconuro'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js'
@@ -20,6 +20,7 @@ const STRUCTS = new Uint8Array([0xFE,0xED])
 
 class Collection {
   #keyspace = 0 // 0: Author, 1: Chain ID, -1: Singularity/Monochain
+  #refs = {}
   /**
    * @param {Store} store
    * @param {string} name
@@ -44,12 +45,20 @@ class Collection {
     const oValue = rootId ? await this.readState(rootId) : this.config.initialValue
     const nValue = mutFn(Object.freeze(oValue), {})
     const diff = formatPatch(oValue, nValue)
-    blockRoot.append(pack({ root: this.name, diff }), secret)
+    blockRoot.append(pack({ root: this.name, diff, date: Date.now() }), secret)
     return await this.store.dispatch(blockRoot)
   }
 
   async readState (id) {
     return this.state[id] || this.config.initialValue
+  }
+
+  async writeState (id, o) {
+    this.state[id] = o
+  }
+
+  async sweepState (id) {
+    delete this.state[id]
   }
 
   /** @param {RootID} id */
@@ -58,19 +67,38 @@ class Collection {
     else return this.store.repo.loadHead(id)
   }
 
-  async _validate (ctx) {
+  async _validateAndMutate (ctx) {
     const {
       data,
       block,
-      parentBlock,
       AUTHOR,
       CHAIN
     } = ctx
+    const id = this.store.repo.allowDetached ? CHAIN : AUTHOR
+    const value = await this.readState(id)
+    const mValue = applyPatch(value, data.diff)
+    const ectx = { id, previous: value, ...ctx }
+    const err = this.config.validate(mValue, ectx)
+    if (err) return err
+    await this.writeState(id, mValue)
+    // Reschedule GC & Ref
+    const expiresAt = this.config.expiresAt(mValue, ectx)
     debugger
+    await this.store.gc.schedule(expiresAt, id)
+    this.refs[id] ||= []
+    this.refs[id].push(block.sig)
   }
 }
 
 export default class Store {
+  stats = {
+    blocksIn: 0,
+    blocksOut: 0,
+    bytesIn: 0,
+    bytesOut: 0,
+    date: Date.now()
+  }
+
   constructor (db, mergeStrategy) {
     this.repo = Repo.isRepo(db) ? db : new Repo(db)
     this.cache = new Cache(this.repo._db)
@@ -220,11 +248,11 @@ export default class Store {
     // Extract tags (used by application to keep track of objects)
     const tags = {}
     if (local.first?.genesis) {
-      tags.AUTHOR = local.first.key
-      tags.CHAIN = local.first.sig
+      tags.AUTHOR = toHex(local.first.key)
+      tags.CHAIN = toHex(local.first.sig)
     } else if (!local.length && patch.first.genesis) {
-      tags.AUTHOR = patch.first.key
-      tags.CHAIN = patch.first.sig
+      tags.AUTHOR = toHex(patch.first.key)
+      tags.CHAIN = toHex(patch.first.sig)
     }
 
     const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
@@ -254,21 +282,22 @@ export default class Store {
       const data = unpack(block.body) // Support multi-root blocks?
       const collection = this.roots[data.root]
       if (!collection) throw new Error('UnknownCollection' + data.root)
-      const validationError = await collection._validate({
+      const validationError = await collection._validateAndMutate({
         data,
         block,
         parentBlock,
         ...tags
       })
 
-      // Abort merging
+      // Abort merging // TODO: What was loud again?
       if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
       else if (validationError === true) return patch.slice(-diff, -diff + nMerged)
 
       // Mutate state
-      await collection._mutateState(block, parentBlock, tags, false, loud)
+      // await collection._mutateState(block, parentBlock, tags, false, loud)
       parentBlock = block
       nMerged++
+      this.stats.blocksIn++ // TODO: move to collection
     }
     this._notifyObservers(modified)
     return patch.slice(-diff, -diff + nMerged)
@@ -502,7 +531,22 @@ function formatPatch (a, b) {
       return out
     }
     default:
-      console.warn('diff: Unhandled type', type, a, b)
+      console.warn('formatPatch: Unhandled type', type, a, b)
+      return b
+  }
+}
+
+function applyPatch (a, b) {
+  const type = typeof b
+  switch (type) {
+    case 'number': return a + b
+    case 'object': {
+      const out = { ...a }
+      for (const k in b) out[k] = applyPatch(a[k], b[k])
+      return out
+    }
+    default:
+      console.warn('applyPatch: Unhandled type', type, a, b)
       return b
   }
 }
