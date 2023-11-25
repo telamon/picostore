@@ -1,14 +1,14 @@
 import debug from 'debug'
+import { encode, decode } from 'cborg'
 const D = debug('pico:gc')
 // const { pack, unpack } = require('msgpackr')
 const REG_TIMER = 'GCt' // magic // can be replaced with sublvl
 
+
 export default class GarbageCollector { // What's left is the scheduler
   intervalId = null
-  constructor (repo, packr) {
-    this.packr = packr // || { pack, unpack }
+  constructor (repo) {
     this.repo = repo
-    // this.db = repo._db
     this.db = repo._db.sublevel(REG_TIMER, {
       keyEncoding: 'buffer',
       valueEncoding: 'buffer'

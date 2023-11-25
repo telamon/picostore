@@ -4,7 +4,7 @@ import { init, get } from 'piconuro'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js'
 import { Packr, pack, unpack } from 'msgpackr'
-const STRUCTS = new Uint8Array([0xFE,0xED])
+const STRUCTS = new Uint8Array([0xBE, 0xEF])
 
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -84,9 +84,13 @@ class Collection {
     // Reschedule GC & Ref
     const expiresAt = this.config.expiresAt(mValue, ectx)
     debugger
+    await this.#setRef(id, block.sig)
     await this.store.gc.schedule(expiresAt, id)
-    this.refs[id] ||= []
-    this.refs[id].push(block.sig)
+  }
+
+  #setRef (stateId, blockId) {
+    this.#refs[stateId] ||= []
+    this.#refs[stateId].push(blockId)
   }
 }
 

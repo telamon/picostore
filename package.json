@@ -32,5 +32,8 @@
   "peerDependencies": {
     "picofeed": "^3.4.1",
     "picorepo": "^1.4.5"
+  },
+  "dependencies": {
+    "cborg": "^4.0.5"
   }
 }
