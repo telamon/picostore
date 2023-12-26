@@ -2,7 +2,7 @@ import debug from 'debug'
 import { toHex } from 'picofeed'
 import { encode, decode } from 'cborg'
 const D = debug('pico:gc')
-const REG_TIMER = 'GCt' // magic // can be replaced with sublvl
+const REG_TIMER = 'GCt'
 
 export default class GarbageCollector { // What's left is the scheduler
   intervalId = null
@@ -23,7 +23,7 @@ export default class GarbageCollector { // What's left is the scheduler
    * @param date {Number} When to run the check next time default to next run.
    */
   async schedule (root, blockRoot, id, date = Date.now()) {
-  const memo = encode({ root, blockRoot, id, date })
+    const memo = encode({ root, blockRoot, id, date })
     const key = mkKey(date)
     D('schedule:', toHex(key), root, id, date)
     await this.db.put(key, memo)

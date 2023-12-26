@@ -7,8 +7,9 @@ import { encode, decode } from 'cborg'
 
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
-/** @typedef {hexstring} Chain */
-/** @typedef {Author|Chain} RootID */
+/** @typedef {hexstring} Signature */
+/** @typedef {Signature} Chain */
+/** @typedef {Author|Chain|Signature} RootID */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
 /** @typedef {
   initialValue?: any,
@@ -18,8 +19,9 @@ import { encode, decode } from 'cborg'
 } CollectionSpec */
 
 class Collection {
-  #keyspace = 0 // 0: Author, 1: Chain ID, -1: Singularity/Monochain
-  #refs = {}
+  version = 0
+  head = undefined
+  state = {}
   /**
    * @param {Store} store
    * @param {string} name
@@ -29,12 +31,11 @@ class Collection {
     this.store = store
     this.name = name
     this.config = config
-    this.state = {}
   }
 
   /**
    * Mutates the decentralized state of this collection.
-   * @param {RootID?} rootId Item identified by chain or author
+   * @param {RootID|null} null to create new item or existing ItemId to modify.
    * @param {(value, MutationContext) => value} mutFn
    * @param {SecretKey} secret Signing secret
    */
@@ -54,26 +55,27 @@ class Collection {
 
   async writeState (id, o) {
     this.state[id] = o
+    this.store._notify('change', { root: this.name, id, value: o })
   }
 
   async sweepState (id) {
     delete this.state[id]
+    this.store._notify('change', { root: this.name, id, value: undefined })
   }
 
   /** @param {RootID} id */
   async readBranch (id) {
-    switch (this.#keyspace) {
-      case -1: throw new Error('monochain mode not implemented')
-      case 0: return this.store.repo.loadHead(id)
-      case 1: return this.store.repo.loadFeed(id)
-    }
+    return this.store.repo._allowDetached
+      ? this.store.repo.loadFeed(id)
+      : this.store.repo.loadHead(id)
   }
 
   async _validateAndMutate (ctx) {
     const {
       data,
       AUTHOR,
-      CHAIN
+      CHAIN,
+      block
     } = ctx
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = blockRoot // TODO: config.id(ctx)
@@ -85,25 +87,39 @@ class Collection {
     await this.writeState(id, mValue)
     // Reschedule GC & Ref
     const expiresAt = this.config.expiresAt(mValue, ectx) || Date.now() + 60000
-    await this.store.refIncrement(blockRoot, this.name, id)
+    await this.store._refIncrement(blockRoot, this.name, id)
     await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
+    this.head = block.id
+    this.version++
   }
 
   async _gc_visit (gcDate, memo) {
-    /* Order of Operations
-     * 1. Visit state-id and determine if it should still be deleted
-     * 2a). Reschedule visit to another time
-     * 2b). Yes; state dropped, evict chain (no partial rollbacks not yet supported)
-     * 3. notify all listening parties
-     */
     const { root, id, date, blockRoot } = memo
     if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
     const expired = () => date < gcDate // TODO: config.isExp
     if (expired()) {
       await this.sweepState(id) // TODO: notify neurons?
-      const evicted = await this.store.refDecrement(blockRoot, this.name, id)
-      return evicted
+      this.version++
+      return await this.store._refDecrement(blockRoot, this.name, id)
     }
+  }
+
+  async _saveState () {
+    await this.store.repo.writeReg(`STATES/${this.name}`, encode({
+      version: this.version,
+      head: this.head,
+      state: this.state
+    }))
+  }
+
+  async _loadState () {
+    const dump = await this.store.repo.readReg(s2b(`STATES/${this.name}`))
+    if (!dump) return
+    const { version, head, state } = dump
+    this.state = state
+    this.version = version
+    this.head = head
+    this.store._notify('change', { root: this.name })
   }
 }
 
@@ -128,6 +144,7 @@ export default class Store {
   _loaded = false
   _tap = null // global signal trap
   mutexTimeout = 5000
+  _onUnlock = []
   stats = {
     blocksIn: 0,
     blocksOut: 0,
@@ -145,8 +162,6 @@ export default class Store {
       keyEncoding: 'view',
       valueEncoding: 'view'
     })
-
-    // this._stores = []
   }
 
   /**
@@ -162,23 +177,27 @@ export default class Store {
     return c
   }
 
-  async refIncrement (blockRoot, stateRoot, objId) {
+  _notify (event, payload) {
+    console.info('event:', event, payload)
+  }
+
+  async _refIncrement (blockRoot, stateRoot, objId) {
     const key = mkRefKey(blockRoot, stateRoot, objId)
     // console.log('INC', toHex(key))
     await this._refReg.put(key, Date.now())
   }
 
-  async refDecrement (blockRoot, stateRoot, objId) {
+  async _refDecrement (blockRoot, stateRoot, objId) {
     const key = mkRefKey(blockRoot, stateRoot, objId)
     // console.log('DEC', toHex(key))
     await this._refReg.del(key)
     // TODO: safe but not efficient place to ref-count and block-sweep
     const nRefs = await this.referencesOf(blockRoot)
+    // passing objId as stop could potentially allow partial rollback
     if (!nRefs) {
-      debugger // TODO: bug???
-      console.log('Purging blockRoot', blockRoot)
-      const e = await this.repo.rollback(blockRoot) // passing objId as stop could enable partial rollback
-      return e
+      const evicted = await this.repo.rollback(blockRoot)
+      this._notify('rollback', { evicted, root: stateRoot })
+      return evicted
     }
   }
 
@@ -187,36 +206,10 @@ export default class Store {
       gt: mkRefKey(blockRoot, 0),
       lt: mkRefKey(blockRoot, Infinity)
     })
-    // console.log('>', toHex(mkRefKey(blockRoot, 0)))
-    // console.log('<', toHex(mkRefKey(blockRoot, Infinity)))
     let c = 0
-    for await (const _ of iter) c++
+    for await (const _ of iter) c++ // eslint-disable-line no-unused-vars
     return c
   }
-
-  /*
-  register (name, initialValue, validator, reducer, trap, sweep) {
-    if (this._loaded) throw new Error('register() must be invoked before load()')
-    if (typeof name !== 'string') {
-      return this.register(name.name, name.initialValue, name.filter, name.reducer, name.trap, name.sweep)
-    } else if (typeof initialValue === 'function') {
-      return this.register(name, undefined, initialValue, validator)
-    }
-
-    this._stores.push({
-      name,
-      validator,
-      reducer,
-      trap,
-      sweep,
-      version: 0,
-      head: undefined,
-      value: initialValue,
-      initialValue,
-      observers: new Set()
-    })
-  }
-  */
 
   async _lockRun (asyncCallback) {
     // WebLocks API trades-off the result of locked context runs.
@@ -237,7 +230,11 @@ export default class Store {
         resolve(res)
       } catch (err) {
         reject(err)
-      } finally { clearTimeout(timerId) }
+      } finally {
+        clearTimeout(timerId)
+        let action = null
+        while ((action = this._onUnlock.shift())) action()
+      }
     }).catch(reject)
     return p
   }
@@ -245,16 +242,9 @@ export default class Store {
   async load () {
     await this._lockRun(async () => {
       if (this._loaded) throw new Error('Store already loaded')
-      /* TODO: Rewrite to roots
-      for (const store of this._stores) {
-        const head = await this.repo.readReg(`HEADS/${store.name}`)
-        if (!head) continue // Empty
-        store.head = head
-        store.version = this._decodeValue(await this.repo.readReg(`VER/${store.name}`))
-        store.value = this._decodeValue(await this.repo.readReg(`STATES/${store.name}`))
-        for (const listener of store.observers) listener(store.value)
+      for (const root in this.roots) {
+        await this.roots[root]._loadState()
       }
-      */
       this._loaded = true
     })
   }
@@ -269,7 +259,7 @@ export default class Store {
 
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
-    /// align + grow blockroots
+    // align + grow blockroots
     patch = Feed.from(patch)
     let local = null // Target branch to merge to
     try {
@@ -332,10 +322,6 @@ export default class Store {
     }
 
     /// Merge DSTATE-roots
-    const modified = new Set()
-    // TODO: The slice(-diff) here is all wrong;
-    // identify patch block sequence containing mergable/new blocks
-    // then return those blocks that were merged
     const merged = []
     for (const block of patch.blocks.slice(-diff)) {
       const data = decode(block.body) // TODO: Support multi-root blocks?
@@ -351,14 +337,93 @@ export default class Store {
       if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
       else if (validationError === true) return Feed.from(merged)
       parentBlock = block
-      await this.repo.merge(block) // TODO: batch merge?
-      this.stats.blocksIn++ // TODO: move to collection
+      const m = await this.repo.merge(block, this._strategy) // TODO: batch merge?
+      if (!m && loud) console.warn('RejectedByBucket: MergeStrategy failed')
+      this._notify('merged', { block, root: data.root })
       merged.push(block)
     }
-    this._notifyObservers(modified)
     return Feed.from(merged)
   }
 
+  get state () {
+    return this._stores.reduce((state, store) => {
+      state[store.name] = store.value
+      return state
+    }, {})
+  }
+
+  /**
+   * Restores all registers to initial values and re-applies all mutations from database.
+   */
+  async reload () {
+    return this._lockRun(async () => {
+      const feeds = await this.repo.listFeeds()
+
+      for (const root in this.roots) {
+        const collection = this.roots[root]
+        collection.state = {}
+        collection.version = 0
+        collection.head = undefined
+      }
+
+      const modified = new Set()
+      for (const { key: ptr, value: CHAIN } of feeds) {
+        const part = await this.repo.loadFeed(ptr)
+        const tags = {
+          AUTHOR: part.first.key,
+          CHAIN
+        }
+        let parentBlock = null
+        for (const block of part.blocks()) {
+          const data = decode(block.body) // TODO: Support multi-root blocks?
+          const collection = this.roots[data.root]
+          if (!collection) throw new Error('UnknownCollection' + data.root)
+          const validationError = await collection._validateAndMutate({
+            data,
+            block,
+            parentBlock,
+            ...tags
+          })
+          if (validationError) throw new Error(`InvalidBlock during reload: ${validationError}`)
+          this._notify('reload', { block, root: data.root })
+          parentBlock = block
+          modified.add(data.root)
+        }
+      }
+      return Array.from(modified)
+    })
+  }
+
+  // Nuro Shortcut
+  $ (name) { return sub => this.on(name, sub) }
+
+  on (name, observer) {
+    const collection = this.roots[name]
+    if (!collection) throw new Error(`No collection named "${name}"`)
+    if (typeof observer !== 'function') throw new Error('observer must be a function')
+    return collection.sub(observer)
+  }
+
+  async gc (now) {
+    const { evicted } = await this._gc.collectGarbage(now, this)
+    return evicted
+  }
+
+  gcStart (interval = 3 * 1000) {
+    if (this.intervalId) return
+    this.intervalId = setInterval(
+      this._gc.collectGarbage.bind(this),
+      interval
+    )
+  }
+
+  gcStop () {
+    if (!this.intervalId) return
+    clearInterval(this.intervalId)
+    this.intervalId = null
+  }
+
+  /*
   async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
     const modified = []
 
@@ -409,7 +474,7 @@ export default class Store {
       await this._commitHead(store, block.sig, val)
       modified.push(store.name)
     }
-
+    // DISABLED 4 NOW
     // Run all traps in signal order
     // NOTE: want to avoid reusing term 'signal' as it's a function
     // TODO: rewrite to while(interrupts.length) to let traps re-signal
@@ -428,107 +493,8 @@ export default class Store {
       for (const [code, payload] of interrupts) this._tap(code, payload)
     }
     return modified
-  }
+  } */
 
-  _notifyObservers (modified) {
-    /*for (const name of modified) {
-      const store = this._stores.find(s => s.name === name)
-      for (const listener of store.observers) listener(store.value)
-    }*/
-  }
-
-  async _commitHead (store, head, val) {
-    await this.repo.writeReg(`STATES/${store.name}`, this._encodeValue(val))
-    await this.repo.writeReg(`HEADS/${store.name}`, head)
-    await this.repo.writeReg(`VER/${store.name}`, this._encodeValue(store.version++))
-
-    // who needs a seatbelt anyway? let's save some memory.
-    store.value = val // Object.freeze(val)
-    store.head = head
-  }
-
-  get state () {
-    return this._stores.reduce((state, store) => {
-      state[store.name] = store.value
-      return state
-    }, {})
-  }
-
-  /**
-   * Restores all registers to initial values and re-applies all mutations from database.
-   */
-  async reload () {
-    return this._lockRun(async () => {
-      const modified = []
-      const feeds = await this.repo.listFeeds()
-
-      for (const store of this._stores) {
-        store.value = store.initialValue
-        store.version = 0
-        store.head = undefined
-        for (const listener of store.observers) listener(store.value)
-      }
-
-      for (const { key: ptr, value: CHAIN } of feeds) {
-        const part = await this.repo.loadFeed(ptr)
-        const tags = {
-          AUTHOR: part.first.key,
-          CHAIN
-        }
-        let parentBlock = null
-        for (const block of part.blocks()) {
-          const mods = await this._mutateState(block, parentBlock, tags, true)
-          // TODO: bug, reload does not persist state?
-          for (const s of mods) {
-            if (!~modified.indexOf(s)) modified.push(s)
-          }
-          parentBlock = block
-        }
-      }
-      this._notifyObservers(modified)
-      return modified
-    })
-  }
-
-  // Nuro Shortcut
-  $ (name) { return sub => this.on(name, sub) }
-
-  on (name, observer) {
-    const store = this._stores.find(s => s.name === name)
-    if (!store) throw new Error(`No such store: "${name}"`)
-    if (typeof observer !== 'function') throw new Error('observer must be a function')
-    store.observers.add(observer)
-    observer(store.value)
-    // unsub
-    return () => store.observers.delete(observer)
-  }
-
-
-  _decodeValue (buf) {
-    if (!buf) return buf
-    return decode(buf)
-  }
-
-  _encodeValue (obj) {
-    return encode(obj)
-  }
-
-  async gc (now) {
-    const { mutated, evicted } = await this._gc.collectGarbage(now, this)
-    this._notifyObservers(mutated)
-    return evicted
-  }
-
-  gcStart (interval = 3 * 1000) {
-    if (this.intervalId) return
-    this.intervalId = setInterval(this._gc.collectGarbage.bind(this), interval)
-  }
-
-  gcStop () {
-    if (!this.intervalId) return
-    clearInterval(this.intervalId)
-    this.intervalId = null
-  }
 }
 
 function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }

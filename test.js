@@ -2,13 +2,13 @@ import test from 'tape'
 import { Feed } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { get } from 'piconuro'
-import { inspect } from 'picorepo/dot.js'
-import { writeFileSync } from 'node:fs'
+// import { inspect } from 'picorepo/dot.js'
+// import { writeFileSync } from 'node:fs'
 import Store from './index.js'
 
 const DB = () => new MemoryLevel({
-  valueEncoding: 'buffer',
-  keyEncoding: 'buffer'
+  valueEncoding: 'view',
+  keyEncoding: 'view'
 })
 
 /**
@@ -21,6 +21,7 @@ test.only('PicoStore 3.x', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
+  // API Change
   const collection = store.spec('profiles', {
     initialValue: 0,
     id: () => 0, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
@@ -33,21 +34,26 @@ test.only('PicoStore 3.x', async t => {
 
   let v = await collection.readState(pk)
   t.equal(v, 0) // Singular states are the exception
-  const blocks = await collection.mutate(null, state => 4, sk)
+
+  // CRDt like patches
+  const blocks = await collection.mutate(null, () => 4, sk)
   t.ok(Feed.isFeed(blocks))
+
   v = await collection.readState(pk)
   t.equal(v, 4)
-  const nRefs = await store.referencesOf(pk) // inspect
+
+  let nRefs = await store.referencesOf(pk)
   t.equal(nRefs, 1, 'Refcount by Author = 1')
-  console.log('Running garbage collector; should expire state')
-  writeFileSync('bug.dot', await inspect(store.repo))
-  // AHA! We've forgotten to call repo.merge() ?
+
   const expunged = await store.gc(Date.now() + 30000)
+  // writeFileSync('bug.dot', await inspect(store.repo))
   t.ok(Array.isArray(expunged))
-  debugger
   t.ok(Feed.isFeed(expunged[0]))
   v = await collection.readState(pk)
   t.equal(v, 0)
+
+  nRefs = await store.referencesOf(pk)
+  t.equal(nRefs, 0, 'Refcount zero')
 })
 
 test('PicoStore', async t => {
