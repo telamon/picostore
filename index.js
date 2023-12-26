@@ -349,7 +349,7 @@ export default class Store {
       })
       // Abort merging // TODO: What was `loud`-flag again?
       if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
-      else if (validationError === true) return Feed.from(merged)
+      else if (validationError === true) return merged.length ? Feed.from(merged) : undefined
       parentBlock = block
       const m = await this.repo.merge(block, this._strategy) // TODO: batch merge?
       if (!m && loud) console.warn('RejectedByBucket: MergeStrategy failed')

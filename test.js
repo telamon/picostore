@@ -12,6 +12,17 @@ const DB = () => new MemoryLevel({
 })
 
 /**
+ * Random Idea #2394 - Sneakernet Delivery Incentive
+ * BoxEncrypt a message onion-style + walletaddresses on each layer
+ * Payment is staked by sender, and split between carriers, recever and sender
+ * once receiver decrypts all layers and receives reports back the
+ * decrypted chain without actually revealing the package.
+ * Basically tipping the network for delivery the less hops/efficent
+ * delivery the more of the staked value should be released back to
+ * sender. (bounty-parcels)
+ */
+
+/**
  * Block-roots are either tracked by Author or Chain
  * A blockroot has many referenes to Objects in Dstate
  * Each object in Dstate has a kill-condition (timer|gameOverFunc)
@@ -101,48 +112,14 @@ test('PicoStore 2.x scenario', async t => {
   t.is(await colCounter.readState(0), 12)
 })
 
-skip('Hotswap repo/bucket', async t => {
-  try {
-    const { sk } = Feed.signPair()
-    const db = DB()
-    const store = new PicoStore(db)
-    store.register('x', 0, () => false, ({ block }) => JSON.parse(block.body))
-    await store.load()
-    t.equal(store.state.x, 0)
-
-    const mutations = new Feed()
-    mutations.append(JSON.stringify(1), sk)
-    mutations.append(JSON.stringify(2), sk)
-    mutations.append(JSON.stringify(3), sk)
-    await store.dispatch(mutations)
-    t.equal(store.state.x, 3)
-
-    const mutB = new Feed()
-    mutB.append(JSON.stringify(7), sk)
-
-    // Flush should immediatly restore initial values and
-    // and swap in the new bucket while freeing
-    // storage up memory in the background
-    const newBucket = DB()
-    const [reloaded, destroyed] = store.hotswap(newBucket)
-    // Que mutations while swap/reload in progress
-    const mutated = store.dispatch(mutB)
-    await reloaded // Await reload, value should be 0 but mutation que will race to 7
-    await mutated // Await new mutations to have been applied
-    t.equal(store.state.x, 7)
-    await destroyed
-  } catch (e) { t.error(e) }
-  t.end()
-})
-
-solo('Buffers should not be lost during state reload', async t => {
+test('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
   const profiles1 = store.spec('pk', { initialValue: {} })
   await store.load()
 
-  let branch = await profiles1.mutate(null, (_) => ({
+  await profiles1.mutate(null, (_) => ({
     nested: { buf: toU8(pk) },
     arr: [toU8(pk)],
     prop: toU8(pk)
@@ -165,23 +142,21 @@ solo('Buffers should not be lost during state reload', async t => {
 test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
-  const store = new PicoStore(db)
+  const store = new Store(db)
   // returning "true" from a validator now is a forced silent ignore
-  store.register('y', 0, () => true, ({ block }) => JSON.parse(block.body))
-  store.register('x', 0, () => 'do not want', ({ block }) => JSON.parse(block.body))
+  const x = store.spec('x', { initialValue: 0, validate: () => 'do not want' })
+  const y = store.spec('y', { initialValue: 0, validate: () => true })
   await store.load()
-  const mutations = new Feed()
-  mutations.append(JSON.stringify(1), sk)
-  try {
-    await store.dispatch(mutations, true)
-    t.fail('error not thrown')
-  } catch (err) {
-    t.equal(err.message, 'InvalidBlock: do not want')
-  }
-  t.end()
+  // validate: 'errstring' = lout fail
+  await t.exception(async () =>
+    await x.mutate(null, () => 1, sk)
+  )
+  // validate: true = silent fail
+  const m = await y.mutate(null, () => 1, sk)
+  t.is(typeof m, 'undefined')
 })
 
-test('Parent block provided to validator', async t => {
+solo('Parent block provided to validator', async t => {
   t.plan(35)
   const { sk } = Feed.signPair()
   const db = DB()
