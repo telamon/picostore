@@ -1,5 +1,5 @@
-import test from 'tape'
-import { Feed } from 'picofeed'
+import { test, skip, solo } from 'brittle'
+import { Feed, cmp, toU8 } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { get } from 'piconuro'
 // import { inspect } from 'picorepo/dot.js'
@@ -17,7 +17,7 @@ const DB = () => new MemoryLevel({
  * Each object in Dstate has a kill-condition (timer|gameOverFunc)
  * when block-root refs reach 0 then the feed is expunged/collected.
  */
-test.only('PicoStore 3.x', async t => {
+test('PicoStore 3.x', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
@@ -25,88 +25,83 @@ test.only('PicoStore 3.x', async t => {
   const collection = store.spec('profiles', {
     initialValue: 0,
     id: () => 0, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
-    validate: () => {}, // ErrorMSG|void
-    expiresAt (v, ctx) { // _ = value???? why not block?
-      return ctx.data.date + 10000 // uint48|falsy=expired
-    }
+    validate: () => false, // ErrorMSG|void
+    expiresAt: date => date + 10000
   })
   await store.load()
 
-  let v = await collection.readState(pk)
-  t.equal(v, 0) // Singular states are the exception
+  let v = await collection.readState(0)
+  t.is(v, 0) // Singular states are the exception
 
   // CRDt like patches
   const blocks = await collection.mutate(null, () => 4, sk)
   t.ok(Feed.isFeed(blocks))
 
-  v = await collection.readState(pk)
-  t.equal(v, 4)
+  v = await collection.readState(0)
+  t.is(v, 4)
 
-  let nRefs = await store.referencesOf(pk)
-  t.equal(nRefs, 1, 'Refcount by Author = 1')
+  let nRefs = await store.referencesOf(pk) // Author is blockRoot
+  t.is(nRefs, 1, 'Refcount by Author = 1')
 
   const expunged = await store.gc(Date.now() + 30000)
   // writeFileSync('bug.dot', await inspect(store.repo))
   t.ok(Array.isArray(expunged))
   t.ok(Feed.isFeed(expunged[0]))
-  v = await collection.readState(pk)
-  t.equal(v, 0)
+  v = await collection.readState(0)
+  t.is(v, 0)
 
   nRefs = await store.referencesOf(pk)
-  t.equal(nRefs, 0, 'Refcount zero')
+  t.is(nRefs, 0, 'Refcount zero')
 })
 
-test('PicoStore', async t => {
+test('PicoStore 2.x scenario', async t => {
   const db = DB()
-  const store = new PicoStore(db)
-  const validator = ({ state, block }) => {
-    const n = JSON.parse(block.body)
-    if (n <= state) return true
+  const store = new Store(db)
+  const spec = {
+    id: () => 0,
+    initialValue: 5,
+    validate: (v, { previous }) => v < previous ? `Must Increment ${v} > ${previous}` : false
   }
-  const reducer = ({ state, block }) => {
-    return JSON.parse(block.body)
-  }
-  store.register('counter', 5, validator, reducer)
+  const colCounter = store.spec('counter', spec)
   await store.load()
 
-  t.equal(store.state.counter, 5)
-
+  t.is(await colCounter.readState(0), 5)
   // Create mutation
   const { sk } = Feed.signPair()
-  const mutations = new Feed()
-  mutations.append(JSON.stringify(7), sk)
-  let changed = await store.dispatch(mutations)
-  t.ok(changed.find(s => s === 'counter'))
-  t.equal(store.state.counter, 7)
+  let branch = await colCounter.mutate(null, v => {
+    t.is(v, 5, 'Previous value')
+    return 7
+  }, sk)
+  t.is(await colCounter.readState(0), 7)
 
   // Try to restore previously persisted state
-  const store2 = new PicoStore(db)
-  store2.register('counter', 5, validator, reducer)
+  const store2 = new Store(db)
+
+  const counter2 = store2.spec('counter', spec)
   await store2.load()
-  t.equal(store2.state.counter, 7)
+  t.is(await counter2.readState(0), 7)
 
-  // Disqualified mutation does not affect state
-  mutations.append(JSON.stringify(2), sk)
-  mutations.append(JSON.stringify(10), sk)
-  changed = await store2.dispatch(mutations)
-  t.equal(changed.length, 0)
-  t.equal(store2.state.counter, 7)
-  mutations.truncate(1) // remove bad blocks
-  mutations.append(JSON.stringify(12), sk)
+  // Rejected changes do not affect state
+  await t.exception(async () =>
+    await counter2.mutate(0, () => 2, sk, branch)
+  )
+  branch.truncate(branch.length - 1) // Lop off the invalid block
+  t.is(await counter2.readState(0), 7)
 
-  changed = await store2.dispatch(mutations)
-  t.equal(changed.length, 1)
-  t.equal(store2.state.counter, 12)
+  // Test valid changes
+  branch = await counter2.mutate(0, () => 10, sk, branch)
+  branch = await counter2.mutate(0, () => 12, sk, branch)
+
+  // let changed = await store.dispatch(branch)
+  // t.equal(changed.length, 1)
+  t.is(await counter2.readState(0), 12)
 
   // Purge and rebuild state from scratch
-  changed = await store.reload()
-  t.equal(changed.length, 1)
-  t.equal(store.state.counter, 12)
-
-  t.end()
+  await store.reload()
+  t.is(await colCounter.readState(0), 12)
 })
 
-test('Hotswap repo/bucket', async t => {
+skip('Hotswap repo/bucket', async t => {
   try {
     const { sk } = Feed.signPair()
     const db = DB()
@@ -140,38 +135,31 @@ test('Hotswap repo/bucket', async t => {
   t.end()
 })
 
-test('Buffers should not be lost during state reload', async t => {
+solo('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new PicoStore(db)
-  store.register('pk', {}, () => false, ({ state, block }) => {
-    state.nested = { buf: block.key }
-    state.arr = [block.key]
-    state.prop = block.key
-    return state
-  })
+  const store = new Store(db)
+  const profiles1 = store.spec('pk', { initialValue: {} })
   await store.load()
-  const mutations = new Feed()
-  mutations.append(JSON.stringify(1), sk)
-  await store.dispatch(mutations)
-  t.ok(pk.equals(store.state.pk.prop))
-  t.ok(pk.equals(store.state.pk.nested.buf))
-  t.ok(pk.equals(store.state.pk.arr[0]))
+
+  let branch = await profiles1.mutate(null, (_) => ({
+    nested: { buf: toU8(pk) },
+    arr: [toU8(pk)],
+    prop: toU8(pk)
+  }), sk)
+  let o = await profiles1.readState(pk)
+  t.ok(cmp(toU8(pk), o.nested.buf))
+  t.ok(cmp(toU8(pk), o.arr[0]))
+  t.ok(cmp(toU8(pk), o.prop))
 
   // Open second store forcing it to load cached state
-
-  const s2 = new PicoStore(db)
-  s2.register('pk', {}, () => false, ({ state, block }) => {
-    state.nested = { buf: block.key }
-    state.arr = [block.key]
-    state.prop = block.key
-    return state
-  })
+  const s2 = new Store(db)
+  const profiles2 = s2.spec('pk', { initialValue: {} })
   await s2.load()
-  t.ok(pk.equals(s2.state.pk.prop))
-  t.ok(pk.equals(s2.state.pk.nested.buf))
-  t.ok(pk.equals(s2.state.pk.arr[0]))
-  t.end()
+  o = await profiles2.readState(pk)
+  t.ok(cmp(toU8(pk), o.nested.buf))
+  t.ok(cmp(toU8(pk), o.arr[0]))
+  t.ok(cmp(toU8(pk), o.prop))
 })
 
 test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {

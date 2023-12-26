@@ -1,5 +1,5 @@
 import { Repo } from 'picorepo'
-import { Feed, getPublicKey, toHex, toU8, s2b } from 'picofeed'
+import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 import { init, get } from 'piconuro'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js'
@@ -30,27 +30,39 @@ class Collection {
   constructor (store, name, config = {}) {
     this.store = store
     this.name = name
-    this.config = config
+    this.config = {
+      id: ({ blockRoot }) => blockRoot,
+      validate: () => false,
+      expiresAt: () => -1, // non-perishable
+      ...config
+    }
   }
 
   /**
    * Mutates the decentralized state of this collection.
-   * @param {RootID|null} null to create new item or existing ItemId to modify.
+   * @param {RootID|null} stateRoot null to create new item or existing ItemId to modify.
    * @param {(value, MutationContext) => value} mutFn
    * @param {SecretKey} secret Signing secret
+   * @param {Feed} feed The branch to append to
    */
-  async mutate (rootId, mutFn, secret) {
+  async mutate (stateRoot, mutFn, secret, blockRoot) {
     // const author = getPublicKey(secret)
-    const feed = rootId ? await this.readBranch(rootId) : new Feed()
-    const oValue = rootId ? await this.readState(rootId) : this.config.initialValue
+    const feed = blockRoot
+      ? Feed.isFeed(blockRoot)
+        ? blockRoot
+        : await this.readBranch(blockRoot)
+      : new Feed()
+    const oValue = await this.readState(stateRoot)
     const nValue = mutFn(Object.freeze(oValue), {})
     const diff = formatPatch(oValue, nValue)
     feed.append(encode({ root: this.name, diff, date: Date.now() }), secret)
-    return await this.store.dispatch(feed)
+    return await this.store.dispatch(feed, true)
   }
 
   async readState (id) {
-    return this.state[id] || this.config.initialValue
+    return id in this.state
+      ? this.state[id]
+      : this.config.initialValue
   }
 
   async writeState (id, o) {
@@ -78,34 +90,38 @@ class Collection {
       block
     } = ctx
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
-    const id = blockRoot // TODO: config.id(ctx)
+    const id = this.config.id({ blockRoot, ...ctx })
     const value = await this.readState(id)
     const mValue = applyPatch(value, data.diff)
     const ectx = { id, blockRoot, previous: value, ...ctx }
     const err = this.config.validate(mValue, ectx)
     if (err) return err
     await this.writeState(id, mValue)
-    // Reschedule GC & Ref
-    const expiresAt = this.config.expiresAt(mValue, ectx) || Date.now() + 60000
+    ectx.value = mValue
+    // Schedule GC & Ref
+    const expiresAt = this.config.expiresAt(data.date, ectx)
     await this.store._refIncrement(blockRoot, this.name, id)
-    await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
-    this.head = block.id
-    this.version++
+    if (expiresAt !== -1) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
+    await this._incrState(block.id)
   }
 
   async _gc_visit (gcDate, memo) {
     const { root, id, date, blockRoot } = memo
     if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
-    const expired = () => date < gcDate // TODO: config.isExp
-    if (expired()) {
-      await this.sweepState(id) // TODO: notify neurons?
+    const expiresAt = this.config.expiresAt(date, memo)
+    if (expiresAt <= gcDate) {
+      await this.sweepState(id)
       this.version++
       return await this.store._refDecrement(blockRoot, this.name, id)
+    } else if (expiresAt !== -1) { // Reschedule
+      await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     }
   }
 
-  async _saveState () {
-    await this.store.repo.writeReg(`STATES/${this.name}`, encode({
+  async _incrState (head) {
+    this.head = head
+    this.version++
+    await this.store.repo.writeReg(s2b(`STATES/${this.name}`), encode({
       version: this.version,
       head: this.head,
       state: this.state
@@ -115,7 +131,7 @@ class Collection {
   async _loadState () {
     const dump = await this.store.repo.readReg(s2b(`STATES/${this.name}`))
     if (!dump) return
-    const { version, head, state } = dump
+    const { version, head, state } = decode(dump)
     this.state = state
     this.version = version
     this.head = head
@@ -171,30 +187,27 @@ export default class Store {
    */
   spec (name, config) {
     if (config && this._loaded) throw new Error('Hotconf not supported')
-    console.log('spec()', name, config)
     const c = new Collection(this, name, config)
     this.roots[name] = c
     return c
   }
 
   _notify (event, payload) {
-    console.info('event:', event, payload)
+    console.info('event:', event, payload.root)
   }
 
   async _refIncrement (blockRoot, stateRoot, objId) {
     const key = mkRefKey(blockRoot, stateRoot, objId)
-    // console.log('INC', toHex(key))
     await this._refReg.put(key, Date.now())
   }
 
   async _refDecrement (blockRoot, stateRoot, objId) {
     const key = mkRefKey(blockRoot, stateRoot, objId)
-    // console.log('DEC', toHex(key))
     await this._refReg.del(key)
     // TODO: safe but not efficient place to ref-count and block-sweep
     const nRefs = await this.referencesOf(blockRoot)
-    // passing objId as stop could potentially allow partial rollback
     if (!nRefs) {
+      // TODO: passing objId as stop could potentially allow partial rollback
       const evicted = await this.repo.rollback(blockRoot)
       this._notify('rollback', { evicted, root: stateRoot })
       return evicted
@@ -252,11 +265,13 @@ export default class Store {
   /**
    * Mutates the state, if a reload is in progress the dispatch will wait
    * for it to complete.
+   * @returns {Promise<Feed|undefined>} merged blocks
    */
   async dispatch (patch, loud) {
     return this._lockRun(() => this._dispatch(patch, loud))
   }
 
+  /** @returns {Promise<Feed|undefined>} merged blocks */
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     // align + grow blockroots
@@ -272,8 +287,7 @@ export default class Store {
       if (patch.first.genesis) local = new Feed() // Happy birthday!
       else {
         await this.cache.push(patch) // Stash for later
-        // throw new Error('UnknownTargetBranch')
-        return []
+        return
       }
     }
 
@@ -288,7 +302,7 @@ export default class Store {
     // canMerge?
     if (!local.clone().merge(patch)) {
       if (loud) throw new Error('UnmergablePatch')
-      else return []
+      else return
     }
 
     // Extract tags (used by application to keep track of objects)
@@ -302,7 +316,7 @@ export default class Store {
     }
 
     const diff = !local.length ? patch.length : local.diff(patch) // WARNING untested internal api.
-    if (diff < 1) return [] // Patch contains equal or less blocks than local
+    if (diff < 1) return // Patch contains equal or less blocks than local
 
     let parentBlock = null
     const _first = patch.blocks[patch.blocks.length - diff]
@@ -313,7 +327,7 @@ export default class Store {
       const it = local.blocks[Symbol.iterator]()
       let res = it.next()
       while (!parentBlock && !res.done) { // TODO: avoid loop using local.get(something)
-        if (res.value.sig.equals(_first.psig)) parentBlock = res.value
+        if (cmp(res.value.sig, _first.psig)) parentBlock = res.value
         res = it.next()
       }
       if (!parentBlock) {
@@ -345,13 +359,6 @@ export default class Store {
     return Feed.from(merged)
   }
 
-  get state () {
-    return this._stores.reduce((state, store) => {
-      state[store.name] = store.value
-      return state
-    }, {})
-  }
-
   /**
    * Restores all registers to initial values and re-applies all mutations from database.
    */
@@ -374,7 +381,7 @@ export default class Store {
           CHAIN
         }
         let parentBlock = null
-        for (const block of part.blocks()) {
+        for (const block of part.blocks) {
           const data = decode(block.body) // TODO: Support multi-root blocks?
           const collection = this.roots[data.root]
           if (!collection) throw new Error('UnknownCollection' + data.root)
@@ -494,7 +501,6 @@ export default class Store {
     }
     return modified
   } */
-
 }
 
 function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
@@ -523,10 +529,14 @@ function unpromise () {
 }
 
 // Experimental
-function formatPatch (a, b) {
+/**
+ * Compares two states and returns the incremental diff
+ * between the two.
+ */
+export function formatPatch (a, b) {
   if (typeof a === 'undefined') return b
-  if (typeof a !== typeof b) throw new Error('Dynamic typeswitching not supported')
-  const type = typeof a
+  if (typeOf(a) !== typeOf(b)) throw new Error('Dynamic typeswitching not supported')
+  const type = typeOf(a)
   switch (type) {
     case 'number': return b - a
     case 'object': {
@@ -534,23 +544,47 @@ function formatPatch (a, b) {
       for (const k in b) out[k] = formatPatch(a[k], b[k])
       return out
     }
-    default:
+    case 'array': {
+      const out = []
+      const m = Math.max(a.length, b.length)
+      for (let i = 0; i < m; i++) out[i] = formatPatch(a[i], b[i])
+      return out
+    }
+    default: // eslint-disable-line default-case-last
       console.warn('formatPatch: Unhandled type', type, a, b)
+    case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
 }
-
-function applyPatch (a, b) {
-  const type = typeof b
+/**
+ * @returns {Object} a new instance with the patch applied */
+export function applyPatch (a, b) {
+  const type = typeOf(b)
   switch (type) {
     case 'number': return a + b
     case 'object': {
+      if (typeOf(a) === 'undefined') a = {}
       const out = { ...a }
       for (const k in b) out[k] = applyPatch(a[k], b[k])
       return out
     }
-    default:
+    case 'array': {
+      if (typeOf(a) === 'undefined') a = []
+      const out = []
+      const m = Math.max(a.length, b.length)
+      for (let i = 0; i < m; i++) out[i] = applyPatch(a[i], b[i])
+      return out
+    }
+    default: // eslint-disable-line default-case-last
       console.warn('applyPatch: Unhandled type', type, a, b)
+    case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
+}
+
+export function typeOf (o) {
+  if (o === null) return 'null'
+  if (Array.isArray(o)) return 'array'
+  if (o instanceof Uint8Array) return 'u8'
+  return typeof o
 }

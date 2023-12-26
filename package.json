@@ -21,6 +21,8 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
+    "brittle": "^3.3.2",
+    "c8": "^8.0.1",
     "cborg": "^4.0.5",
     "memory-level": "^1.0.0",
     "picofeed": "^5.0.1",
