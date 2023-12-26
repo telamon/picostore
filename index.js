@@ -1,10 +1,9 @@
 import { Repo } from 'picorepo'
-import { Feed, getPublicKey, b2h as toHex } from 'picofeed'
+import { Feed, getPublicKey, toHex, toU8, s2b } from 'picofeed'
 import { init, get } from 'piconuro'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js'
-import { Packr, pack, unpack } from 'msgpackr'
-const STRUCTS = new Uint8Array([0xBE, 0xEF])
+import { encode, decode } from 'cborg'
 
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -41,12 +40,12 @@ class Collection {
    */
   async mutate (rootId, mutFn, secret) {
     // const author = getPublicKey(secret)
-    const blockRoot = rootId ? await this.readBranch(rootId) : new Feed()
+    const feed = rootId ? await this.readBranch(rootId) : new Feed()
     const oValue = rootId ? await this.readState(rootId) : this.config.initialValue
     const nValue = mutFn(Object.freeze(oValue), {})
     const diff = formatPatch(oValue, nValue)
-    blockRoot.append(pack({ root: this.name, diff, date: Date.now() }), secret)
-    return await this.store.dispatch(blockRoot)
+    feed.append(encode({ root: this.name, diff, date: Date.now() }), secret)
+    return await this.store.dispatch(feed)
   }
 
   async readState (id) {
@@ -63,38 +62,72 @@ class Collection {
 
   /** @param {RootID} id */
   async readBranch (id) {
-    if (this.#keyspace) return this.store.repo.loadFeed(id)
-    else return this.store.repo.loadHead(id)
+    switch (this.#keyspace) {
+      case -1: throw new Error('monochain mode not implemented')
+      case 0: return this.store.repo.loadHead(id)
+      case 1: return this.store.repo.loadFeed(id)
+    }
   }
 
   async _validateAndMutate (ctx) {
     const {
       data,
-      block,
       AUTHOR,
       CHAIN
     } = ctx
-    const id = this.store.repo.allowDetached ? CHAIN : AUTHOR
+    const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
+    const id = blockRoot // TODO: config.id(ctx)
     const value = await this.readState(id)
     const mValue = applyPatch(value, data.diff)
-    const ectx = { id, previous: value, ...ctx }
+    const ectx = { id, blockRoot, previous: value, ...ctx }
     const err = this.config.validate(mValue, ectx)
     if (err) return err
     await this.writeState(id, mValue)
     // Reschedule GC & Ref
-    const expiresAt = this.config.expiresAt(mValue, ectx)
-    debugger
-    await this.#setRef(id, block.sig)
-    await this.store.gc.schedule(expiresAt, id)
+    const expiresAt = this.config.expiresAt(mValue, ectx) || Date.now() + 60000
+    await this.store.refIncrement(blockRoot, this.name, id)
+    await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
   }
 
-  #setRef (stateId, blockId) {
-    this.#refs[stateId] ||= []
-    this.#refs[stateId].push(blockId)
+  async _gc_visit (gcDate, memo) {
+    /* Order of Operations
+     * 1. Visit state-id and determine if it should still be deleted
+     * 2a). Reschedule visit to another time
+     * 2b). Yes; state dropped, evict chain (no partial rollbacks not yet supported)
+     * 3. notify all listening parties
+     */
+    const { root, id, date, blockRoot } = memo
+    if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
+    const expired = () => date < gcDate // TODO: config.isExp
+    if (expired()) {
+      await this.sweepState(id) // TODO: notify neurons?
+      const evicted = await this.store.refDecrement(blockRoot, this.name, id)
+      return evicted
+    }
   }
 }
 
+/**
+ * @param {hexstring|Uint8Array} blockRoot
+ * @param {string} stateRoot
+ * @param {hexstring|Uint8Array} objId
+ */
+function mkRefKey (blockRoot, stateRoot, objId) {
+  const b = toU8(blockRoot)
+  const s = typeof stateRoot === 'string' && s2b(stateRoot)
+  const k = new Uint8Array(b.length + 12 + 32)
+  k.set(b, 0)
+  if (stateRoot === Infinity) for (let i = 0; i < 12; i++) k[b.length + i] = 0xff
+  else if (s) k.set(s, b.length)
+  if (objId) k.set(toU8(objId), b.length + 12)
+  return k
+}
+
 export default class Store {
+  roots = {} // StateRoots
+  _loaded = false
+  _tap = null // global signal trap
+  mutexTimeout = 5000
   stats = {
     blocksIn: 0,
     blocksOut: 0,
@@ -106,14 +139,14 @@ export default class Store {
   constructor (db, mergeStrategy) {
     this.repo = Repo.isRepo(db) ? db : new Repo(db)
     this.cache = new Cache(this.repo._db)
+    this._gc = new GarbageCollector(this.repo)
     this._strategy = mergeStrategy || (() => {})
+    this._refReg = this.repo._db.sublevel('REFs', {
+      keyEncoding: 'view',
+      valueEncoding: 'view'
+    })
+
     // this._stores = []
-    this.roots = {}
-    this._loaded = false
-    this._tap = null // global sigint trap
-    this._packr = null
-    this.mutexTimeout = 5000
-    this._collections = {}
   }
 
   /**
@@ -126,6 +159,38 @@ export default class Store {
     console.log('spec()', name, config)
     const c = new Collection(this, name, config)
     this.roots[name] = c
+    return c
+  }
+
+  async refIncrement (blockRoot, stateRoot, objId) {
+    const key = mkRefKey(blockRoot, stateRoot, objId)
+    // console.log('INC', toHex(key))
+    await this._refReg.put(key, Date.now())
+  }
+
+  async refDecrement (blockRoot, stateRoot, objId) {
+    const key = mkRefKey(blockRoot, stateRoot, objId)
+    // console.log('DEC', toHex(key))
+    await this._refReg.del(key)
+    // TODO: safe but not efficient place to ref-count and block-sweep
+    const nRefs = await this.referencesOf(blockRoot)
+    if (!nRefs) {
+      debugger // TODO: bug???
+      console.log('Purging blockRoot', blockRoot)
+      const e = await this.repo.rollback(blockRoot) // passing objId as stop could enable partial rollback
+      return e
+    }
+  }
+
+  async referencesOf (blockRoot) {
+    const iter = this._refReg.iterator({
+      gt: mkRefKey(blockRoot, 0),
+      lt: mkRefKey(blockRoot, Infinity)
+    })
+    // console.log('>', toHex(mkRefKey(blockRoot, 0)))
+    // console.log('<', toHex(mkRefKey(blockRoot, Infinity)))
+    let c = 0
+    for await (const _ of iter) c++
     return c
   }
 
@@ -180,19 +245,6 @@ export default class Store {
   async load () {
     await this._lockRun(async () => {
       if (this._loaded) throw new Error('Store already loaded')
-
-      let structures = await this.repo.readReg(STRUCTS)
-      if (structures) structures = unpack(structures)
-      else structures = []
-
-      this._packr = new Packr({
-        structures,
-        saveStructures: () => this.repo.writeReg(STRUCTS, pack(structures))
-        // .then(console.info.bind(null, 'msgpackr:structs saved'))
-          .catch(console.error.bind(null, 'Failed saving msgpackr:structs'))
-      })
-
-      this._gc = new GarbageCollector(this.repo, this._packr)
       /* TODO: Rewrite to roots
       for (const store of this._stores) {
         const head = await this.repo.readReg(`HEADS/${store.name}`)
@@ -259,7 +311,7 @@ export default class Store {
       tags.CHAIN = toHex(patch.first.sig)
     }
 
-    const diff = !local.length ? patch.length : local._compare(patch) // WARNING untested internal api.
+    const diff = !local.length ? patch.length : local.diff(patch) // WARNING untested internal api.
     if (diff < 1) return [] // Patch contains equal or less blocks than local
 
     let parentBlock = null
@@ -280,10 +332,13 @@ export default class Store {
     }
 
     /// Merge DSTATE-roots
-    let nMerged = 0
     const modified = new Set()
+    // TODO: The slice(-diff) here is all wrong;
+    // identify patch block sequence containing mergable/new blocks
+    // then return those blocks that were merged
+    const merged = []
     for (const block of patch.blocks.slice(-diff)) {
-      const data = unpack(block.body) // Support multi-root blocks?
+      const data = decode(block.body) // TODO: Support multi-root blocks?
       const collection = this.roots[data.root]
       if (!collection) throw new Error('UnknownCollection' + data.root)
       const validationError = await collection._validateAndMutate({
@@ -292,19 +347,16 @@ export default class Store {
         parentBlock,
         ...tags
       })
-
-      // Abort merging // TODO: What was loud again?
+      // Abort merging // TODO: What was `loud`-flag again?
       if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
-      else if (validationError === true) return patch.slice(-diff, -diff + nMerged)
-
-      // Mutate state
-      // await collection._mutateState(block, parentBlock, tags, false, loud)
+      else if (validationError === true) return Feed.from(merged)
       parentBlock = block
-      nMerged++
+      await this.repo.merge(block) // TODO: batch merge?
       this.stats.blocksIn++ // TODO: move to collection
+      merged.push(block)
     }
     this._notifyObservers(modified)
-    return patch.slice(-diff, -diff + nMerged)
+    return Feed.from(merged)
   }
 
   async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
@@ -379,10 +431,10 @@ export default class Store {
   }
 
   _notifyObservers (modified) {
-    for (const name of modified) {
+    /*for (const name of modified) {
       const store = this._stores.find(s => s.name === name)
       for (const listener of store.observers) listener(store.value)
-    }
+    }*/
   }
 
   async _commitHead (store, head, val) {
@@ -451,32 +503,14 @@ export default class Store {
     return () => store.observers.delete(observer)
   }
 
-  /**
-   * TODO: remove
-   * Hotswaps data-storage immediately reloading store from given bucket
-   * and destroying previous database deleting all values in the background
-   * to free up memory in storage.
-   * returns an array containing two promises:
-   *   Reload op: Store ready for use again when resolves.
-   *   Destroy op: Old database was succesfully cleared when resolved.
-   */
-  hotswap (db) {
-    const prev = this.repo
-    // Swap database and begin reload
-    this.repo = db instanceof PicoRepo ? db : new PicoRepo(db)
-    const reloaded = this.reload()
-    // TODO: move this to PicoRepo#destroy() => Promise
-    const destroyed = prev._db.clear()
-    return [reloaded, destroyed]
-  }
 
   _decodeValue (buf) {
     if (!buf) return buf
-    return this._packr.unpack(buf)
+    return decode(buf)
   }
 
   _encodeValue (obj) {
-    return this._packr.pack(obj)
+    return encode(obj)
   }
 
   async gc (now) {

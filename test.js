@@ -2,6 +2,8 @@ import test from 'tape'
 import { Feed } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { get } from 'piconuro'
+import { inspect } from 'picorepo/dot.js'
+import { writeFileSync } from 'node:fs'
 import Store from './index.js'
 
 const DB = () => new MemoryLevel({
@@ -9,23 +11,43 @@ const DB = () => new MemoryLevel({
   keyEncoding: 'buffer'
 })
 
+/**
+ * Block-roots are either tracked by Author or Chain
+ * A blockroot has many referenes to Objects in Dstate
+ * Each object in Dstate has a kill-condition (timer|gameOverFunc)
+ * when block-root refs reach 0 then the feed is expunged/collected.
+ */
 test.only('PicoStore 3.x', async t => {
-  const { sk } = Feed.signPair()
+  const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
   const collection = store.spec('profiles', {
     initialValue: 0,
-    id: () => 0, // AuthorPK|ChainID|BlockID|ArbitraryNumber
-    validate: block => {}, // ErrorMSG|void
-    expiresAt: block => {} // uint48|falsy=expired
+    id: () => 0, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
+    validate: () => {}, // ErrorMSG|void
+    expiresAt (v, ctx) { // _ = value???? why not block?
+      return ctx.data.date + 10000 // uint48|falsy=expired
+    }
   })
   await store.load()
 
-  let v = await collection.readState(0)
+  let v = await collection.readState(pk)
   t.equal(v, 0) // Singular states are the exception
   const blocks = await collection.mutate(null, state => 4, sk)
-  v = await collection.readState(0)
-  t.equal(v, 4) // Singular states are the exception
+  t.ok(Feed.isFeed(blocks))
+  v = await collection.readState(pk)
+  t.equal(v, 4)
+  const nRefs = await store.referencesOf(pk) // inspect
+  t.equal(nRefs, 1, 'Refcount by Author = 1')
+  console.log('Running garbage collector; should expire state')
+  writeFileSync('bug.dot', await inspect(store.repo))
+  // AHA! We've forgotten to call repo.merge() ?
+  const expunged = await store.gc(Date.now() + 30000)
+  t.ok(Array.isArray(expunged))
+  debugger
+  t.ok(Feed.isFeed(expunged[0]))
+  v = await collection.readState(pk)
+  t.equal(v, 0)
 })
 
 test('PicoStore', async t => {

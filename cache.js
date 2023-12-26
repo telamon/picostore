@@ -1,16 +1,16 @@
-import { Feed, b2h as toHex } from 'picofeed'
+import { Feed, toHex } from 'picofeed'
 // TODO:
 // - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)
 export default class MemPool {
   constructor (db) {
     this.blocks = db.sublevel('b', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
+      keyEncoding: 'view',
+      valueEncoding: 'view'
     })
     this.refs = db.sublevel('r', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
+      keyEncoding: 'view',
+      valueEncoding: 'view'
     })
   }
 

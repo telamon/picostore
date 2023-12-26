@@ -21,19 +21,17 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
+    "cborg": "^4.0.5",
     "memory-level": "^1.0.0",
-    "msgpackr": "^1.9.9",
-    "picofeed": "^4.1.0",
+    "picofeed": "^5.0.1",
     "piconuro": "^1.0.1",
-    "picorepo": "^2.0.3",
+    "picorepo": "^2.1.1",
     "standard": "^17.1.0",
-    "tape": "^5.7.1"
+    "tape": "^5.7.2"
   },
   "peerDependencies": {
-    "picofeed": "^3.4.1",
-    "picorepo": "^1.4.5"
-  },
-  "dependencies": {
-    "cborg": "^4.0.5"
+    "cborg": "^4.0.5",
+    "picofeed": "^5.0.1",
+    "picorepo": "^2.1.1"
   }
 }

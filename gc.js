@@ -1,17 +1,16 @@
 import debug from 'debug'
+import { toHex } from 'picofeed'
 import { encode, decode } from 'cborg'
 const D = debug('pico:gc')
-// const { pack, unpack } = require('msgpackr')
 const REG_TIMER = 'GCt' // magic // can be replaced with sublvl
-
 
 export default class GarbageCollector { // What's left is the scheduler
   intervalId = null
   constructor (repo) {
     this.repo = repo
     this.db = repo._db.sublevel(REG_TIMER, {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
+      keyEncoding: 'view',
+      valueEncoding: 'view'
     })
   }
 
@@ -23,20 +22,11 @@ export default class GarbageCollector { // What's left is the scheduler
    * @param payload {Object} A state reference to check.
    * @param date {Number} When to run the check next time default to next run.
    */
-  schedule (slice, tags, block, payload, date = Date.now()) {
-    if (!payload) throw new Error('PayloadExpected')
-    const sig = block.sig
-    const memo = this.packr.pack({
-      slice,
-      sig,
-      payload,
-      tags,
-      date
-    })
+  async schedule (root, blockRoot, id, date = Date.now()) {
+  const memo = encode({ root, blockRoot, id, date })
     const key = mkKey(date)
-    D('mark', new Date(date), 'key:', key.toString('hex'), 'payload:', payload)
-    this.db.put(key, memo)
-      .catch(error => console.error('Failed queing GC: ', error))
+    D('schedule:', toHex(key), root, id, date)
+    await this.db.put(key, memo)
   }
 
   async tickQuery (now) {
@@ -52,7 +42,7 @@ export default class GarbageCollector { // What's left is the scheduler
       const res = await iter.next()
       if (!res) break
       const [key, value] = res
-      result.push(this.packr.unpack(value))
+      result.push(decode(value))
       batch.push({ type: 'del', key })
     }
     await iter.close()
@@ -64,53 +54,19 @@ export default class GarbageCollector { // What's left is the scheduler
     D('Starting collecting garbage...')
     now = Math.floor(now) // Floor floats
     const pending = await this.tickQuery(now)
-
     D('Fetched pending from store:', pending.length)
-    let mutated = new Set()
-    const dropOps = []
-    for (const p of pending) {
-      const {
-        slice,
-        sig,
-        tags,
-        payload,
-        date: sweepAt
-      } = p
-      const store = picoStore._stores.find(s => s.name === slice)
-      const block = await this.repo.readBlock(sig)
-      const parentBlock = await (block && this.repo.readBlock(block.parentSig))
-      if (typeof store.sweep !== 'function') throw new Error('Slice does not implement Sweep()')
-      const val = await store.sweep({
-        block,
-        parentBlock,
-        now,
-        sig,
-        sweepAt,
-        ...tags,
-        payload,
-        rootState: picoStore.state,
-        state: store.value,
-        mark: (p, time) => this.schedule(slice, tags, block, p || payload, time),
-        didMutate: n => mutated.add(n), // Not sure about this.
-        drop: stopBlock => dropOps.push([tags.CHAIN, stopBlock])
-      })
-
-      if (typeof val !== 'undefined') {
-        await picoStore._commitHead(store, sig, val)
-        mutated.add(slice)
-      }
-    }
     const evicted = []
-    for (const [ptr, stop] of dropOps) {
-      try {
-        evicted.push(await this.repo.rollback(ptr, stop))
-      } catch (err) {
-        if (err.message === 'FeedNotFound') {
-          D('RollbackFailed, Feed already gone', err)
-        } else console.error('Rollback failed', err)
+    let mutated = new Set()
+    for (const memo of pending) {
+      const { root } = memo
+      const collection = picoStore.roots[root]
+      if (!collection) throw new Error(`Unknown Root ${root}`)
+      const droppedFeed = await collection._gc_visit(now, memo)
+      if (droppedFeed) {
+        evicted.push(droppedFeed)
+        mutated.add(root)
       }
     }
-    // notify all affected stores
     mutated = Array.from(mutated)
     D('Stores mutated', mutated, 'segments evicted', evicted.length)
     return { mutated, evicted }
@@ -126,15 +82,11 @@ let _lastDate = 0
  * @return {Buffer<9>} a 9-byte binary key
  */
 function mkKey (date, counter) {
-  // SpaceEfficient + FastLookups not supported by all Buffer shims
-  // b.writeBigUInt64BE(BigInt(date), 0) // Writes 8-bytes
-
   // Manually writeBigUInt64BE
-  const b = Buffer.alloc(9)
+  const b = new Uint8Array(9)
   for (let i = 0; i < 8; i++) {
     b[i] = Number((BigInt(date) >> BigInt((7 - i) * 8)) & BigInt(255))
   }
-
   if (counter ?? false) b[8] = counter
   else {
     // Automatic counter '_ctr' prevents task-overwrites
@@ -145,6 +97,5 @@ function mkKey (date, counter) {
     if (_ctr > 255) console.warn('Warning: >255 GC-tasks enqueued, systemfault?')
     b[8] = _ctr % 256
   }
-
   return b
 }
