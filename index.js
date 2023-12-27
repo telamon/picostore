@@ -1,8 +1,8 @@
 import { Repo } from 'picorepo'
 import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
-import { init, get } from 'piconuro'
+// import { init, get } from 'piconuro'
 import Cache from './cache.js'
-import GarbageCollector from './gc.js'
+import GarbageCollector from './gc.js' // TODO: rename to scheduler
 import { encode, decode } from 'cborg'
 
 /** @typedef {string} hexstring */
@@ -11,13 +11,16 @@ import { encode, decode } from 'cborg'
 /** @typedef {Signature} Chain */
 /** @typedef {Author|Chain|Signature} RootID */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
-/** @typedef {
+/** @typedef {{
   initialValue?: any,
   id: () => hexstring|number,
   validate: () => string?,
   expiresAt: () => number
-} CollectionSpec */
+}} CollectionSpec */
 
+/**
+ * A reference-counting dstate manager
+ */
 class Collection {
   version = 0
   head = undefined
@@ -31,7 +34,7 @@ class Collection {
     this.store = store
     this.name = name
     this.config = {
-      id: ({ blockRoot }) => blockRoot,
+      id: ({ AUTHOR, CHAIN }) => store.repo.allowDetached ? CHAIN : AUTHOR,
       validate: () => false,
       expiresAt: () => -1, // non-perishable
       ...config
@@ -40,23 +43,27 @@ class Collection {
 
   /**
    * Mutates the decentralized state of this collection.
-   * @param {RootID|null} stateRoot null to create new item or existing ItemId to modify.
+   * @param {Chain|BlockId|Feed} branch
    * @param {(value, MutationContext) => value} mutFn
    * @param {SecretKey} secret Signing secret
    * @param {Feed} feed The branch to append to
    */
-  async mutate (stateRoot, mutFn, secret, blockRoot) {
-    // const author = getPublicKey(secret)
-    const feed = blockRoot
-      ? Feed.isFeed(blockRoot)
-        ? blockRoot
-        : await this.readBranch(blockRoot)
-      : new Feed()
+  async mutate (branch, mutFn, secret) {
+    const AUTHOR = getPublicKey(secret)
+    branch = !branch
+      ? new Feed() // create new
+      : Feed.isFeed(branch)
+        ? branch
+        : await this.readBranch(branch)
+    // TODO: get chain id from repo incase partial feed was passed
+    const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
+    // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
+    const stateRoot = this.config.id({ AUTHOR, CHAIN })
     const oValue = await this.readState(stateRoot)
     const nValue = mutFn(Object.freeze(oValue), {})
     const diff = formatPatch(oValue, nValue)
-    feed.append(encode({ root: this.name, diff, date: Date.now() }), secret)
-    return await this.store.dispatch(feed, true)
+    branch.append(encode({ root: this.name, diff, date: Date.now() }), secret)
+    return await this.store.dispatch(branch, true)
   }
 
   async readState (id) {
