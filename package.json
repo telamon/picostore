@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "lint": "standard",
-    "test": "tape test.js",
+    "test": "node test.js",
     "debug": "node inspect test.js",
     "prepublishOnly": "standard && npm test"
   },
