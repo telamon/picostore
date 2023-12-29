@@ -7,8 +7,9 @@
   "scripts": {
     "lint": "standard",
     "test": "node test.js",
+    "types": "tsc --allowJs --checkJs --declaration --emitDeclarationOnly --lib es2022,dom --target es2022 --outFile index.js --moduleResolution nodenext index.js",
     "debug": "node inspect test.js",
-    "prepublishOnly": "standard && npm test"
+    "prepublishOnly": "standard && npm test && npm run types"
   },
   "repository": {
     "type": "git",
@@ -25,7 +26,7 @@
     "c8": "^8.0.1",
     "cborg": "^4.0.5",
     "memory-level": "^1.0.0",
-    "picofeed": "^5.0.1",
+    "picofeed": "^5.0.2",
     "piconuro": "^1.0.1",
     "picorepo": "^2.1.1",
     "standard": "^17.1.0"

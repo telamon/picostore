@@ -7,23 +7,16 @@ import { encode, decode } from 'cborg'
 
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
-/** @typedef {hexstring} Signature */
-/** @typedef {Signature} Chain */
-/** @typedef {Author|Chain|Signature} RootID */
+/** @typedef {Author|Signature} RootID */
+/** @typedef {import('picofeed').Signature} Signature */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
-/** @typedef {{
-  initialValue?: any,
-  id?: () => hexstring|number,
-  validate: () => string?,
-  expiresAt?: () => number
-}} CollectionSpec */
-
+/** @typedef {import('picofeed').PublicKey} PublicKey */
 /**
  * A reference-counting decentralized state manager
  */
 export class Memory {
   initialValue = undefined
-  store = null
+  #store = null
   #cache = {} // in-memory cached state
   #version = 0
   #head = undefined
@@ -31,10 +24,9 @@ export class Memory {
   /**
    * @param {Store} store
    * @param {string} name
-   * @param {CollectionSpec} config
    */
   constructor (store, name) {
-    this.store = store
+    this.#store = store
     this.name = name
     // SanityCheck required methods
     for (const method of [
@@ -44,31 +36,12 @@ export class Memory {
     }
   }
 
+  /** @returns {Store} */
+  get store () { return this.#store }
   get state () { return decode(encode(this.#cache)) } // clone
   async idOf ({ AUTHOR, CHAIN }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
   async validate () { return false } // Accept everything
   async expiresAt () { return Infinity } // Never
-
-  /**
-   * Mutates the decentralized state of this collection.
-   * @param {Chain|BlockId|Feed} branch
-   * @param {(value, MutationContext) => value} mutFn
-   * @param {SecretKey} secret Signing secret
-   * @param {Feed} feed The branch to append to
-   */
-  async mutate (branch, mutFn, secret) {
-    const AUTHOR = getPublicKey(secret)
-    branch = await this.fetchBranch(branch)
-    // TODO: get chain id from repo incase partial feed was passed
-    const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
-    // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
-    const stateRoot = await this.idOf({ AUTHOR, CHAIN })
-    const oValue = await this.readState(stateRoot)
-    const nValue = mutFn(Object.freeze(oValue), {})
-    const diff = formatPatch(oValue, nValue)
-    branch.append(encode({ root: this.name, diff, date: Date.now() }), secret)
-    return await this.store.dispatch(branch, true)
-  }
 
   async readState (id) {
     return id in this.#cache
@@ -86,15 +59,15 @@ export class Memory {
     this.store._notify('change', { root: this.name, id, value: undefined })
   }
 
-  /** Fetches a writable feed
-   *  @param {undefined|Signature|PublicKey} branch
-    * @returns {Promise<Feed>} */
-  async fetchBranch (branch) {
-    if (!branch) return new Feed()
-    if (Feed.isFeed(branch)) return branch
-    // TODO: This signature/pk assumption does not sit well.
-    if (this.store.repo._allowDetached) return await this.store.repo.loadFeed(branch)
-    return await this.store.repo.loadHead(branch) // Fallback to assuming 'branch' is a pubkey
+  /**
+   * Index a block using a secondary-key
+   */
+  async #index (blockId, pKey) {
+    const k = new Uint8Array(blockId.length + 3)
+    k.set(toU8('iPK'))
+    k.set(toU8(pKey), 3)
+    debugger
+    await this.store.repo.writeReg(k, toU8(blockId))
   }
 
   async _validateAndMutate (ctx) {
@@ -107,10 +80,11 @@ export class Memory {
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR // TODO: this is utterly wrong
     const id = await this.idOf(ctx)
     const value = await this.readState(id) // TODO: Copy?
-    const mValue = await this.reduce(value, ctx)
 
     const ectx = { id, previous: value, ...ctx }
-    const err = await this.validate(mValue, ectx) // TODO: postpone()
+    const err = await this.validate(data, ectx) // TODO: postpone()
+    // TODO: reduce should not be run before filter!
+    const mValue = await this.reduce(value, { ...ctx, index: this.#index.bind(this, block.sig) })
     if (err) return err
     await this._writeState(id, mValue)
     ectx.value = mValue
@@ -154,11 +128,44 @@ export class Memory {
     this.head = head
     this.store._notify('change', { root: this.name })
   }
+
+  /**
+   * Resolves HEAD-ptr of the chain for a given Object-Id
+   */
+  async blockRootOf(objId) {
+    // TODO: not implemented
+  }
 }
 
+/**
+ * This memory model comes with a built-in
+ * block creation function: 'mutate()'
+ * making it easy to sync changes across peers
+ */
 export class CRDTMemory extends Memory {
   reduce (value, { data }) {
     return applyPatch(value, data.diff)
+  }
+
+  /**
+   * Mutates the decentralized state of this collection.
+   * @param {Signature|Feed} branch
+   * @param {(value, MutationContext) => value} mutFn
+   * @param {SecretKey} secret Signing secret
+   * @param {Feed} feed The branch to append to
+   */
+  async mutate (branch, mutFn, secret) {
+    const AUTHOR = getPublicKey(secret)
+    branch = await this.store.readBranch(branch)
+    // TODO: get chain id from repo incase partial feed was passed
+    const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
+    // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
+    const stateRoot = await this.idOf({ AUTHOR, CHAIN })
+    const oValue = await this.readState(stateRoot)
+    const nValue = mutFn(Object.freeze(oValue), {})
+    const diff = formatPatch(oValue, nValue)
+    branch.append(encode({ root: this.name, diff, date: Date.now() }), secret)
+    return await this.store.dispatch(branch, true)
   }
 }
 
@@ -167,7 +174,7 @@ export class CRDTMemory extends Memory {
  * @param {string} stateRoot
  * @param {hexstring|Uint8Array} objId
  */
-function mkRefKey (blockRoot, stateRoot, objId) {
+function mkRefKey (blockRoot, stateRoot, objId = null) {
   const b = toU8(blockRoot)
   const s = typeof stateRoot === 'string' && s2b(stateRoot)
   const k = new Uint8Array(b.length + 12 + 32)
@@ -204,9 +211,10 @@ export default class Store {
   }
 
   /**
-   * Initializes a collection decentralized state
+   * Initializes a managed decentralized memory area
    * @param {string} name The name of the collection
-   * @param {CollectionSpec} config collection configuration
+   * @param {typeof Memory} MemorySubClass Memory management or subclass
+   * @returns {Memory}
    */
   register (name, MemorySubClass) {
     if (this._loaded) throw new Error('Hotconf not supported')
@@ -246,6 +254,19 @@ export default class Store {
     let c = 0
     for await (const _ of iter) c++ // eslint-disable-line no-unused-vars
     return c
+  }
+
+  /** Fetches a writable feed
+   *  @param {undefined|Signature|PublicKey} branch
+    * @returns {Promise<Feed>} */
+  async readBranch (branch) {
+    if (!branch) return new Feed()
+    if (Feed.isFeed(branch)) return branch
+    // TODO: This signature/pk assumption does not sit well.
+    branch = toU8(branch)
+    return branch.length === 32
+      ? await this.repo.loadHead(branch) // Assume pubkey
+      : await this.repo.resolveFeed(branch) // Assume blockid
   }
 
   async _lockRun (asyncCallback) {
@@ -546,6 +567,7 @@ const locks = (
   }
 }
 
+/** @returns {[Promise, (v: any) => void, (e: Error) => void]} */
 function unpromise () {
   let solve, eject
   const p = new Promise((resolve, reject) => { solve = resolve; eject = reject })

@@ -1,6 +1,7 @@
 import { test, skip, solo } from 'brittle'
-import { Feed, cmp, toU8 } from 'picofeed'
+import { Feed, cmp, toU8, getPublicKey } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
+import { encode } from 'cborg'
 import { get } from 'piconuro'
 // import { inspect } from 'picorepo/dot.js'
 // import { writeFileSync } from 'node:fs'
@@ -72,6 +73,7 @@ solo('DVM3.x bidirectional memory refs', async t => {
     }
 
     validate (value, { previous }) {
+      console.log(value)
       if (previous.name === '' && typeof value.name === 'undefined') return 'NameMustBeSet'
       if (previous.name !== '' && previous.name !== value.name) return 'NameChangeNotPermitted'
     }
@@ -137,16 +139,29 @@ solo('DVM3.x bidirectional memory refs', async t => {
       await deIndex(AUTHOR) // Release Hug-cap
     }
 
+    async createHug (target, secret) {
+      const branch = await this.store.readBranch(getPublicKey(secret))
+      const data = encode({ root: 'hugs', type: 'hug', target: toU8(target), date: Date.now() })
+      branch.append(data, secret)
+      return this.store.dispatch(branch)
+    }
   })
 
   await store.load()
-  const { pk, sk } = Feed.signPair()
-  const generatedFeed = await profiles.mutate(null, p => ({ ...p, name: 'telamohn' }), sk)
-  const objId = await profiles.idOf(pk) // We know the blockRoot === ObjectId
-  t.is(objId, pk)
-  const sigHEAD = await profiles.blockRootOf(objId)
-  const feed = await profiles.readBranch(objId)
-  t.ok(cmp(sigHEAD, feed.last.id))
+  const A = Feed.signPair()
+  const B = Feed.signPair()
+  const feedA = await profiles.mutate(null, p => ({ ...p, name: 'alice' }), A.sk)
+  const objId = A.pk // Bad example: We know that blockRoot === ObjectId
+  const sigHEAD = await profiles.blockRootOf(objId) // TODO: undefined
+  const feed = await store.readBranch(A.pk)
+  t.is(feed.diff(feedA), 0)
+  // t.ok(cmp(sigHEAD, feed.last.id))
+
+  const feedB = await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
+  feedA.inspect()
+  feedB.inspect()
+  const f2 = await hugs.createHug(B.pk, A.sk)
+  f2.inspect()
 })
 
 test('PicoStore 2.x scenario', async t => {

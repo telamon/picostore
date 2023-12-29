@@ -31,7 +31,7 @@ export default class GarbageCollector { // What's left is the scheduler
 
   async tickQuery (now) {
     const query = {
-      gt: Buffer.alloc(9), // All zeroes
+      gt: new Uint8Array(9), // All zeroes
       lt: mkKey(now, 0xff)
     }
     D('sweep range:', query.gt.toString('hex'), '...', query.lt.toString('hex'))
@@ -79,7 +79,7 @@ let _lastDate = 0
  * Creates a binary LevelDB key indexes tasks by
  * Timestamp.
  * @param {number} date Timestamp
- * @return {Buffer<9>} a 9-byte binary key
+ * @return {Uint8Array} a 9-byte binary key
  */
 function mkKey (date, counter) {
   // Manually writeBigUInt64BE
