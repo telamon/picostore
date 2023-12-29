@@ -4,7 +4,7 @@ import { MemoryLevel } from 'memory-level'
 import { get } from 'piconuro'
 // import { inspect } from 'picorepo/dot.js'
 // import { writeFileSync } from 'node:fs'
-import Store from './index.js'
+import Store, { Memory, CRDTMemory } from './index.js'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -26,9 +26,10 @@ test('PicoStore 3.x', async t => {
   const db = DB()
   const store = new Store(db)
   // API Change
-  const collection = store.spec('profiles', {
+  const collection = store.spec('counter', {
     initialValue: 0,
-    id: () => 0, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
+    // malloc() => id/ptr
+    id: () => 0, // PK<Author>|ChainID<Task,Note>|BlockID<Chat,Battle>
     validate: () => false, // ErrorMSG|void
     expiresAt: date => date + 10000
   })
@@ -56,6 +57,96 @@ test('PicoStore 3.x', async t => {
 
   nRefs = await store.referencesOf(pk)
   t.is(nRefs, 0, 'Refcount zero')
+})
+
+solo('DVM3.x bidirectional memory refs', async t => {
+  const db = DB()
+  const store = new Store(db)
+
+  // CRDt Managed Memory
+  const profiles = store.register('profile', class Profiles extends CRDTMemory {
+    initialValue = { name: '', hp: 3, sent: 0, accepted: 0, rejected: 0 }
+
+    idOf ({ AUTHOR }) { // Only one profile per Public key
+      return AUTHOR // return blockRoot
+    }
+
+    validate (value, { previous }) {
+      if (previous.name === '' && typeof value.name === 'undefined') return 'NameMustBeSet'
+      if (previous.name !== '' && previous.name !== value.name) return 'NameChangeNotPermitted'
+    }
+
+    expiresAt (date, { value }) {
+      return date + value.hp * (20*60000) // All creatures die without hugs
+    }
+
+    // CRDtMemory implements reduce and sweep
+
+    async trap (signal, payload, mutate) {
+      if (signal !== 'hug-settled') return
+      const { status, from, to } = payload
+      // This is where it becomes problematic / breaks CRDT behaviour
+      if (status === 'accepted') {
+        await mutate(from, s => ({ ...s, hp: s.hp + 1.5, sent: s.sent + 1 }))
+        await mutate(to, s => ({ ...s, hp: s.hp + 1.5, accepted: s.accepted + 1 }))
+      } else {
+        await mutate(from, s => ({ ...s, hp: s.hp - 0.3, sent: s.sent + 1 }))
+        await mutate(to, s => ({ ...s, hp: s.hp + 2, rejected: s.rejected + 1 }))
+      }
+    }
+  })
+
+  // Custom Instruction Memory
+  const hugs = store.register('hugs', class Hugs extends Memory {
+    idOf ({ data, block, parent }) {
+      if (data.type === 'hug') return block.id
+      if (data.type === 'response') return parent.id
+    }
+
+    async validate (data, { id, AUTHOR, block, postpone, lookup }) {
+      if (data.type === 'hug') {
+        if (block.genesis) return 'NoAnonymousHugs'
+        if (cmp(data.target, AUTHOR)) return 'NoSelfhugs'
+        // Secondary Index lookups
+        const lastHug = await this.readState(await lookup(AUTHOR))
+        if (lastHug?.status === 'pending') return 'CannotInitiateWhilePending'
+        // Cross memory lookups
+        const peer = await profiles.readState(data.target) // reffing "profiles" collection
+        if (!peer) return postpone(30000, 'NoGhostHugs') // Postpone upto 3 Times then RejectionMessage
+      } else if (data.type === 'response') {
+        const pData = this.readState(id)
+        if (pData.target !== AUTHOR) return 'NotYourHug'
+        if (![true, false].includes(data.ok)) return 'InvalidResponse'
+      } else return 'InvalidType'
+    }
+
+    async reduce (currentValue, { data, id, AUTHOR, signal, index }) {
+      const out = { ...currentValue }
+      if (data.type === 'hug') {
+        out.from = AUTHOR
+        out.to = data.target
+        out.status = 'pending'
+        await index(AUTHOR, id)
+      } else {
+        out.status = data.ok ? 'accepted' : 'rejected'
+        signal('hug-settled', { to: out.to, from: out.from, status: out.status })
+      }
+    }
+
+    async sweep ({ id, AUTHOR, deIndex }) {
+      await deIndex(AUTHOR) // Release Hug-cap
+    }
+
+  })
+
+  await store.load()
+  const { pk, sk } = Feed.signPair()
+  const generatedFeed = await profiles.mutate(null, p => ({ ...p, name: 'telamohn' }), sk)
+  const objId = await profiles.idOf(pk) // We know the blockRoot === ObjectId
+  t.is(objId, pk)
+  const sigHEAD = await profiles.blockRootOf(objId)
+  const feed = await profiles.readBranch(objId)
+  t.ok(cmp(sigHEAD, feed.last.id))
 })
 
 test('PicoStore 2.x scenario', async t => {

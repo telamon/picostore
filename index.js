@@ -2,7 +2,7 @@ import { Repo } from 'picorepo'
 import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 // import { init, get } from 'piconuro'
 import Cache from './cache.js'
-import GarbageCollector from './gc.js' // TODO: rename to scheduler
+import GarbageCollector from './gc.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
 
 /** @typedef {string} hexstring */
@@ -13,33 +13,41 @@ import { encode, decode } from 'cborg'
 /** @typedef {import('picofeed').SecretKey} SecretKey */
 /** @typedef {{
   initialValue?: any,
-  id: () => hexstring|number,
+  id?: () => hexstring|number,
   validate: () => string?,
-  expiresAt: () => number
+  expiresAt?: () => number
 }} CollectionSpec */
 
 /**
- * A reference-counting dstate manager
+ * A reference-counting decentralized state manager
  */
-class Collection {
-  version = 0
-  head = undefined
-  state = {}
+export class Memory {
+  initialValue = undefined
+  store = null
+  #cache = {} // in-memory cached state
+  #version = 0
+  #head = undefined
+
   /**
    * @param {Store} store
    * @param {string} name
    * @param {CollectionSpec} config
    */
-  constructor (store, name, config = {}) {
+  constructor (store, name) {
     this.store = store
     this.name = name
-    this.config = {
-      id: ({ AUTHOR, CHAIN }) => store.repo.allowDetached ? CHAIN : AUTHOR,
-      validate: () => false,
-      expiresAt: () => -1, // non-perishable
-      ...config
+    // SanityCheck required methods
+    for (const method of [
+      'reduce'
+    ]) {
+      if (typeof this[method] !== 'function') throw new Error(`${this.constructor.name} must implement async ${method}`)
     }
   }
+
+  get state () { return decode(encode(this.#cache)) } // clone
+  async idOf ({ AUTHOR, CHAIN }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
+  async validate () { return false } // Accept everything
+  async expiresAt () { return Infinity } // Never
 
   /**
    * Mutates the decentralized state of this collection.
@@ -50,15 +58,11 @@ class Collection {
    */
   async mutate (branch, mutFn, secret) {
     const AUTHOR = getPublicKey(secret)
-    branch = !branch
-      ? new Feed() // create new
-      : Feed.isFeed(branch)
-        ? branch
-        : await this.readBranch(branch)
+    branch = await this.fetchBranch(branch)
     // TODO: get chain id from repo incase partial feed was passed
     const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
     // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
-    const stateRoot = this.config.id({ AUTHOR, CHAIN })
+    const stateRoot = await this.idOf({ AUTHOR, CHAIN })
     const oValue = await this.readState(stateRoot)
     const nValue = mutFn(Object.freeze(oValue), {})
     const diff = formatPatch(oValue, nValue)
@@ -67,26 +71,30 @@ class Collection {
   }
 
   async readState (id) {
-    return id in this.state
-      ? this.state[id]
-      : this.config.initialValue
+    return id in this.#cache
+      ? this.#cache[id]
+      : this.initialValue
   }
 
-  async writeState (id, o) {
-    this.state[id] = o
+  async _writeState (id, o) {
+    this.#cache[id] = o
     this.store._notify('change', { root: this.name, id, value: o })
   }
 
-  async sweepState (id) {
-    delete this.state[id]
+  async _sweepState (id) {
+    delete this.#cache[id]
     this.store._notify('change', { root: this.name, id, value: undefined })
   }
 
-  /** @param {RootID} id */
-  async readBranch (id) {
-    return this.store.repo._allowDetached
-      ? this.store.repo.loadFeed(id)
-      : this.store.repo.loadHead(id)
+  /** Fetches a writable feed
+   *  @param {undefined|Signature|PublicKey} branch
+    * @returns {Promise<Feed>} */
+  async fetchBranch (branch) {
+    if (!branch) return new Feed()
+    if (Feed.isFeed(branch)) return branch
+    // TODO: This signature/pk assumption does not sit well.
+    if (this.store.repo._allowDetached) return await this.store.repo.loadFeed(branch)
+    return await this.store.repo.loadHead(branch) // Fallback to assuming 'branch' is a pubkey
   }
 
   async _validateAndMutate (ctx) {
@@ -96,19 +104,21 @@ class Collection {
       CHAIN,
       block
     } = ctx
-    const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
-    const id = this.config.id({ blockRoot, ...ctx })
-    const value = await this.readState(id)
-    const mValue = applyPatch(value, data.diff)
-    const ectx = { id, blockRoot, previous: value, ...ctx }
-    const err = this.config.validate(mValue, ectx)
+    const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR // TODO: this is utterly wrong
+    const id = await this.idOf(ctx)
+    const value = await this.readState(id) // TODO: Copy?
+    const mValue = await this.reduce(value, ctx)
+
+    const ectx = { id, previous: value, ...ctx }
+    const err = await this.validate(mValue, ectx) // TODO: postpone()
     if (err) return err
-    await this.writeState(id, mValue)
+    await this._writeState(id, mValue)
     ectx.value = mValue
     // Schedule GC & Ref
-    const expiresAt = this.config.expiresAt(data.date, ectx)
+    const expiresAt = await this.expiresAt(data.date, ectx)
+    console.log('ExpiresAt', expiresAt)
+    if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
-    if (expiresAt !== -1) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this._incrState(block.id)
   }
 
@@ -117,21 +127,21 @@ class Collection {
     if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
     const expiresAt = this.config.expiresAt(date, memo)
     if (expiresAt <= gcDate) {
-      await this.sweepState(id)
-      this.version++
+      await this._sweepState(id)
+      this.#version++
       return await this.store._refDecrement(blockRoot, this.name, id)
-    } else if (expiresAt !== -1) { // Reschedule
+    } else if (expiresAt !== Infinity) { // Reschedule
       await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     }
   }
 
   async _incrState (head) {
-    this.head = head
-    this.version++
+    this.#head = head
+    this.#version++
     await this.store.repo.writeReg(s2b(`STATES/${this.name}`), encode({
-      version: this.version,
-      head: this.head,
-      state: this.state
+      version: this.#version,
+      head: this.#head,
+      state: this.#cache
     }))
   }
 
@@ -139,10 +149,16 @@ class Collection {
     const dump = await this.store.repo.readReg(s2b(`STATES/${this.name}`))
     if (!dump) return
     const { version, head, state } = decode(dump)
-    this.state = state
+    this.#cache = state
     this.version = version
     this.head = head
     this.store._notify('change', { root: this.name })
+  }
+}
+
+export class CRDTMemory extends Memory {
+  reduce (value, { data }) {
+    return applyPatch(value, data.diff)
   }
 }
 
@@ -192,9 +208,10 @@ export default class Store {
    * @param {string} name The name of the collection
    * @param {CollectionSpec} config collection configuration
    */
-  spec (name, config) {
-    if (config && this._loaded) throw new Error('Hotconf not supported')
-    const c = new Collection(this, name, config)
+  register (name, MemorySubClass) {
+    if (this._loaded) throw new Error('Hotconf not supported')
+    if (!(MemorySubClass.prototype instanceof Memory)) throw new Error('Expected a subclass of Memory')
+    const c = new MemorySubClass(this, name)
     this.roots[name] = c
     return c
   }
