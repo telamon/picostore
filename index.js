@@ -4,13 +4,32 @@ import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
-
+const SymPostpone = Symbol.for('pDVM::postpone')
+/** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
-/** @typedef {Author|Signature} RootID */
-/** @typedef {import('picofeed').Signature} Signature */
+/** @typedef {import('picofeed').Block} Block */
+/** @typedef {u8} BlockID */
+/** @typedef {u8|hexstring} Signature */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
 /** @typedef {import('picofeed').PublicKey} PublicKey */
+/** @typedef {{
+      block: Block,
+      parentBlock: Block,
+      AUTHOR: PublicKey,
+      CHAIN: BlockID,
+      data: any
+    }} DispatchContext
+    @typedef {DispatchContext} ComputeContext
+    @typedef { DispatchContext & {
+      postpone: (timeMillis: number, errorMsg: string) => void,
+      lookup: (key: u8|string) => Promise<BlockID>
+    }} ValidateContext
+    @typedef { DispatchContext & {
+      index: (key: u8|string) => Promise<Void>,
+      signal: (name: string, payload: any) => void
+    }} OnapplyContext
+  */
 /**
  * A reference-counting decentralized state manager
  */
@@ -30,7 +49,7 @@ export class Memory {
     this.name = name
     // SanityCheck required methods
     for (const method of [
-      'reduce'
+      'compute'
     ]) {
       if (typeof this[method] !== 'function') throw new Error(`${this.constructor.name} must implement async ${method}`)
     }
@@ -39,9 +58,18 @@ export class Memory {
   /** @returns {Store} */
   get store () { return this.#store }
   get state () { return decode(encode(this.#cache)) } // clone
-  async idOf ({ AUTHOR, CHAIN }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
-  async validate () { return false } // Accept everything
-  async expiresAt () { return Infinity } // Never
+
+  /** @param {DispatchContext} ctx */
+  async idOf (ctx) { return this.store.repo.allowDetached ? ctx.CHAIN : ctx.AUTHOR }
+  /** @param {any} value Current state
+    * @param {ValidateContext} ctx */
+  async validate (value, vctx) { return false } // eslint-disable-line no-unused-vars
+  /** @param {DispatchContext} ctx */
+  async expiresAt (ctx) { return Infinity } // eslint-disable-line no-unused-vars
+  /** @param {any} value Current state
+    * @param {ComputeContext} ctx */
+  async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) must be implemented by subclass') }
+  async onapply (value, ctx) { }
 
   async readState (id) {
     return id in this.#cache
@@ -63,34 +91,46 @@ export class Memory {
    * Index a block using a secondary-key
    */
   async #index (blockId, pKey) {
-    const k = new Uint8Array(blockId.length + 3)
+    /*const k = new Uint8Array(blockId.length + 3)
     k.set(toU8('iPK'))
-    k.set(toU8(pKey), 3)
+    k.set(toU8(pKey), 3)*/
+    const k = ccat(toU8('iPK'), toU8(pKey))
     debugger
     await this.store.repo.writeReg(k, toU8(blockId))
   }
 
+  /** @param {DispatchContext} ctx */
   async _validateAndMutate (ctx) {
-    const {
-      data,
-      AUTHOR,
-      CHAIN,
-      block
-    } = ctx
-    const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR // TODO: this is utterly wrong
-    const id = await this.idOf(ctx)
-    const value = await this.readState(id) // TODO: Copy?
+    const { data, block, AUTHOR, CHAIN } = ctx
+    // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
+    const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
+    const id = await this.idOf(ctx) // ObjId
+    const value = tripWire(await this.readState(id)) // TODO: Copy?
+    const ectx = { id, ...ctx } // Extend context with ObjectID
 
-    const ectx = { id, previous: value, ...ctx }
-    const err = await this.validate(data, ectx) // TODO: postpone()
-    // TODO: reduce should not be run before filter!
-    const mValue = await this.reduce(value, { ...ctx, index: this.#index.bind(this, block.sig) })
+    // Phase 0: Parse block and compute the new draft state
+    const draft = await this.compute(value, ectx)
+
+    // Phase 1: Validate the computed draft
+    const err = await this.validate(draft, {
+      ...ectx,
+      previous: value,
+      postpone: (time, errorMsg, retries = 3) => { throw new Error('TODO') },
+      lookup: () => { throw new Error('TODO') }
+    })
     if (err) return err
-    await this._writeState(id, mValue)
-    ectx.value = mValue
-    // Schedule GC & Ref
+
+    // Phase 2: Apply the draft and run the post-apply hook
+    await this._writeState(id, draft)
+    ectx.value = draft
+    await this.onapply(draft, {
+      ...ectx,
+      index: this.#index.bind(this, block.id),
+      signal: () => { throw new Error('TODO') }
+    })
+
+    // Phase 3: Schedule deinitialization & increment reference counts
     const expiresAt = await this.expiresAt(data.date, ectx)
-    console.log('ExpiresAt', expiresAt)
     if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
     await this._incrState(block.id)
@@ -131,8 +171,9 @@ export class Memory {
 
   /**
    * Resolves HEAD-ptr of the chain for a given Object-Id
+   * Rename to headOf(ObjectID) ?
    */
-  async blockRootOf(objId) {
+  async blockRootOf (objId) {
     // TODO: not implemented
   }
 }
@@ -143,16 +184,15 @@ export class Memory {
  * making it easy to sync changes across peers
  */
 export class CRDTMemory extends Memory {
-  reduce (value, { data }) {
+  compute (value, { data }) {
     return applyPatch(value, data.diff)
   }
 
   /**
    * Mutates the decentralized state of this collection.
-   * @param {Signature|Feed} branch
+   * @param {BlockID|Feed} branch
    * @param {(value, MutationContext) => value} mutFn
    * @param {SecretKey} secret Signing secret
-   * @param {Feed} feed The branch to append to
    */
   async mutate (branch, mutFn, secret) {
     const AUTHOR = getPublicKey(secret)
@@ -212,14 +252,14 @@ export default class Store {
 
   /**
    * Initializes a managed decentralized memory area
-   * @param {string} name The name of the collection
-   * @param {typeof Memory} MemorySubClass Memory management or subclass
-   * @returns {Memory}
+   * @param {string} name - The name of the collection
+   * @param {() => Memory} MemoryClass - Constructor of Memory or subclass
+   * @returns {Memory} - An instance of the MemorySubClass
    */
-  register (name, MemorySubClass) {
+  register (name, MemoryClass) {
     if (this._loaded) throw new Error('Hotconf not supported')
-    if (!(MemorySubClass.prototype instanceof Memory)) throw new Error('Expected a subclass of Memory')
-    const c = new MemorySubClass(this, name)
+    if (!(MemoryClass.prototype instanceof Memory)) throw new Error('Expected a subclass of Memory')
+    const c = new MemoryClass(this, name)
     this.roots[name] = c
     return c
   }
@@ -230,7 +270,7 @@ export default class Store {
 
   async _refIncrement (blockRoot, stateRoot, objId) {
     const key = mkRefKey(blockRoot, stateRoot, objId)
-    await this._refReg.put(key, Date.now())
+    await this._refReg.put(key, encode({ stateRoot, objId }))
   }
 
   async _refDecrement (blockRoot, stateRoot, objId) {
@@ -257,7 +297,7 @@ export default class Store {
   }
 
   /** Fetches a writable feed
-   *  @param {undefined|Signature|PublicKey} branch
+   *  @param {undefined|BlockID|PublicKey} branch
     * @returns {Promise<Feed>} */
   async readBranch (branch) {
     if (!branch) return new Feed()
@@ -633,4 +673,28 @@ export function typeOf (o) {
   if (Array.isArray(o)) return 'array'
   if (o instanceof Uint8Array) return 'u8'
   return typeof o
+}
+
+export function ccat (...buffers) { // TODO: Move to Picofeed ?
+  if (buffers.length === 1 && Array.isArray(buffers[0])) buffers = buffers[0]
+  const out = new Uint8Array(buffers.reduce((sum, buf) => sum + buf.length, 0))
+  let o = 0
+  for (const buf of buffers) { out.set(buf, o); o += buf.length }
+  return out
+}
+
+export function tripWire (o, path = []) {
+  if (!o || typeof o !== 'object') return o
+  return new Proxy(o, {
+    get (target, key) {
+      switch (typeOf(o)) {
+        case 'array': // TODO?
+        case 'object': return tripWire(target[key], [...path, key])
+        default: return target[key]
+      }
+    },
+    set (_, key) {
+      throw new Error(`Attempted to modifiy: ${path.join('.')}[${key}]`)
+    }
+  })
 }

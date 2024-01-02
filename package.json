@@ -7,7 +7,7 @@
   "scripts": {
     "lint": "standard",
     "test": "node test.js",
-    "types": "tsc --allowJs --checkJs --declaration --emitDeclarationOnly --lib es2022,dom --target es2022 --outFile index.js --moduleResolution nodenext index.js",
+    "types": "tsc --allowJs --checkJs --removeComments --declaration --emitDeclarationOnly --lib es2022,dom --target es2022 --outFile index.js --moduleResolution nodenext index.js",
     "debug": "node inspect test.js",
     "prepublishOnly": "standard && npm test && npm run types"
   },

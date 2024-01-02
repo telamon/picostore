@@ -105,16 +105,30 @@ solo('DVM3.x bidirectional memory refs', async t => {
       if (data.type === 'response') return parent.id
     }
 
-    async validate (data, { id, AUTHOR, block, postpone, lookup }) {
+    async compute (currentValue, { data, AUTHOR }) {
+      console.log('DataCompute', data)
+      const out = { ...currentValue }
+      if (data.type === 'hug') {
+        out.from = AUTHOR
+        out.to = data.target
+        out.status = 'pending'
+      } else {
+        out.status = data.ok ? 'accepted' : 'rejected'
+      }
+      return out
+    }
+
+    async validate (value, { data, id, AUTHOR, block, postpone, lookup }) {
+      console.log('DataValidate', data)
       if (data.type === 'hug') {
         if (block.genesis) return 'NoAnonymousHugs'
-        if (cmp(data.target, AUTHOR)) return 'NoSelfhugs'
+        if (cmp(value.to, AUTHOR)) return 'NoSelfhugs'
         // Secondary Index lookups
         const lastHug = await this.readState(await lookup(AUTHOR))
         if (lastHug?.status === 'pending') return 'CannotInitiateWhilePending'
         // Cross memory lookups
         const peer = await profiles.readState(data.target) // reffing "profiles" collection
-        if (!peer) return postpone(30000, 'NoGhostHugs') // Postpone upto 3 Times then RejectionMessage
+        if (!peer) return postpone(30000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
       } else if (data.type === 'response') {
         const pData = this.readState(id)
         if (pData.target !== AUTHOR) return 'NotYourHug'
@@ -122,17 +136,10 @@ solo('DVM3.x bidirectional memory refs', async t => {
       } else return 'InvalidType'
     }
 
-    async reduce (currentValue, { data, id, AUTHOR, signal, index }) {
-      const out = { ...currentValue }
-      if (data.type === 'hug') {
-        out.from = AUTHOR
-        out.to = data.target
-        out.status = 'pending'
-        await index(AUTHOR, id)
-      } else {
-        out.status = data.ok ? 'accepted' : 'rejected'
-        signal('hug-settled', { to: out.to, from: out.from, status: out.status })
-      }
+    async onapply (value, { AUTHOR, id, signal, index }) {
+      const { status, to, from } = value
+      if (status === 'pending') await index(AUTHOR, id) // PHASE: on-apply
+      else signal('hug-settled', { to, from, status }) // PHASE: on-apply
     }
 
     async sweep ({ id, AUTHOR, deIndex }) {
