@@ -1,5 +1,5 @@
 import { test, skip, solo } from 'brittle'
-import { Feed, cmp, toU8, getPublicKey } from 'picofeed'
+import { Feed, toHex, toU8, getPublicKey } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { encode } from 'cborg'
 import { get } from 'piconuro'
@@ -63,6 +63,7 @@ test('PicoStore 3.x', async t => {
 solo('DVM3.x bidirectional memory refs', async t => {
   const db = DB()
   const store = new Store(db)
+  let receivedSignal = null
 
   // CRDt Managed Memory
   const profiles = store.register('profile', class Profiles extends CRDTMemory {
@@ -72,10 +73,10 @@ solo('DVM3.x bidirectional memory refs', async t => {
       return AUTHOR // return blockRoot
     }
 
-    validate (value, { previous }) {
+    validate (value, { previous, reject }) {
       console.log(value)
-      if (previous.name === '' && typeof value.name === 'undefined') return 'NameMustBeSet'
-      if (previous.name !== '' && previous.name !== value.name) return 'NameChangeNotPermitted'
+      if (previous.name === '' && typeof value.name === 'undefined') return reject('NameMustBeSet')
+      if (previous.name !== '' && previous.name !== value.name) return reject('NameChangeNotPermitted')
     }
 
     expiresAt (date, { value }) {
@@ -85,6 +86,7 @@ solo('DVM3.x bidirectional memory refs', async t => {
     // CRDtMemory implements reduce and sweep
 
     async trap (signal, payload, mutate) {
+      receivedSignal = signal
       if (signal !== 'hug-settled') return
       const { status, from, to } = payload
       // This is where it becomes problematic / breaks CRDT behaviour
@@ -103,40 +105,37 @@ solo('DVM3.x bidirectional memory refs', async t => {
     idOf ({ data, block, parent }) {
       if (data.type === 'hug') return block.id
       if (data.type === 'response') return parent.id
+      // Else await lookup(HeadOf)
     }
 
-    async compute (currentValue, { data, AUTHOR }) {
-      console.log('DataCompute', data)
-      const out = { ...currentValue }
+    async compute (currentValue, { data, AUTHOR, block, postpone, reject, lookup }) {
       if (data.type === 'hug') {
-        out.from = AUTHOR
-        out.to = data.target
-        out.status = 'pending'
-      } else {
-        out.status = data.ok ? 'accepted' : 'rejected'
-      }
-      return out
-    }
+        // Validate block
+        if (block.genesis) return reject('NoAnonymousHugs')
+        if (toHex(data.target) === AUTHOR) return reject('NoSelfhugs')
 
-    async validate (value, { data, id, AUTHOR, block, postpone, lookup }) {
-      console.log('DataValidate', data)
-      if (data.type === 'hug') {
-        if (block.genesis) return 'NoAnonymousHugs'
-        if (cmp(value.to, AUTHOR)) return 'NoSelfhugs'
-        // Secondary Index lookups
+        // Secondary Index lookups: hugsByAuthor[author] => block-id
         const lastHug = await this.readState(await lookup(AUTHOR))
-        if (lastHug?.status === 'pending') return 'CannotInitiateWhilePending'
+        if (lastHug?.status === 'pending') return reject('CannotInitiateWhilePending')
+
         // Cross memory lookups
-        const peer = await profiles.readState(data.target) // reffing "profiles" collection
-        if (!peer) return postpone(30000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
+        const peer = await profiles.readState(data.target) // referencing "profiles" collection
+        if (!peer) return postpone(10000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
+
+        // Return new state
+        return { ...currentValue, from: AUTHOR, to: data.target, status: 'pending' }
       } else if (data.type === 'response') {
-        const pData = this.readState(id)
-        if (pData.target !== AUTHOR) return 'NotYourHug'
-        if (![true, false].includes(data.ok)) return 'InvalidResponse'
-      } else return 'InvalidType'
+        // Validate block
+        if (currentValue.to !== AUTHOR) return reject('NotYourHug')
+        if (![true, false].includes(data.ok)) return reject('InvalidResponse')
+        // Return new state
+        return { ...currentValue, status: data.ok ? 'accepted' : 'rejected' }
+      } else {
+        return reject('InvalidType')
+      }
     }
 
-    async onapply (value, { AUTHOR, id, signal, index }) {
+    async postapply (value, { AUTHOR, id, signal, index }) {
       const { status, to, from } = value
       if (status === 'pending') await index(AUTHOR, id) // PHASE: on-apply
       else signal('hug-settled', { to, from, status }) // PHASE: on-apply
@@ -168,6 +167,8 @@ solo('DVM3.x bidirectional memory refs', async t => {
   feedA.inspect()
   feedB.inspect()
   const f2 = await hugs.createHug(B.pk, A.sk)
+  // Signal should have been fired and trapped
+  t.is(receivedSignal, 'hug-settled')
   f2.inspect()
 })
 

@@ -5,6 +5,7 @@ import Cache from './cache.js'
 import GarbageCollector from './gc.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
 const SymPostpone = Symbol.for('pDVM::postpone')
+const SymReject = Symbol.for('pDVM::reject')
 /** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -20,16 +21,21 @@ const SymPostpone = Symbol.for('pDVM::postpone')
       CHAIN: BlockID,
       data: any
     }} DispatchContext
-    @typedef {DispatchContext} ComputeContext
+
+    // Root of the problem
     @typedef { DispatchContext & {
-      postpone: (timeMillis: number, errorMsg: string) => void,
+      reject: (message) => SymReject,
+      postpone: (timeMillis: number, errorMsg: string, nTries: 3) => SymPostpone,
+      signal: (name: string, payload: any) => void,
       lookup: (key: u8|string) => Promise<BlockID>
-    }} ValidateContext
+    }} ComputeContext
+
     @typedef { DispatchContext & {
       index: (key: u8|string) => Promise<Void>,
       signal: (name: string, payload: any) => void
-    }} OnapplyContext
-  */
+    }} PostapplyContext
+ */
+
 /**
  * A reference-counting decentralized state manager
  */
@@ -47,12 +53,11 @@ export class Memory {
   constructor (store, name) {
     this.#store = store
     this.name = name
+
     // SanityCheck required methods
     for (const method of [
       'compute'
-    ]) {
-      if (typeof this[method] !== 'function') throw new Error(`${this.constructor.name} must implement async ${method}`)
-    }
+    ]) { if (typeof this.compute !== 'function') throw new Error(`${this.constructor.name} must implement async ${method}`) }
   }
 
   /** @returns {Store} */
@@ -61,15 +66,13 @@ export class Memory {
 
   /** @param {DispatchContext} ctx */
   async idOf (ctx) { return this.store.repo.allowDetached ? ctx.CHAIN : ctx.AUTHOR }
-  /** @param {any} value Current state
-    * @param {ValidateContext} ctx */
-  async validate (value, vctx) { return false } // eslint-disable-line no-unused-vars
   /** @param {DispatchContext} ctx */
   async expiresAt (ctx) { return Infinity } // eslint-disable-line no-unused-vars
   /** @param {any} value Current state
-    * @param {ComputeContext} ctx */
-  async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) must be implemented by subclass') }
-  async onapply (value, ctx) { }
+    * @param {ComputeContext} ctx
+    * @returns {Rejection|Postpone|Draft} The new draft state */
+  async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
+  async postapply (value, ctx) { }
 
   async readState (id) {
     return id in this.#cache
@@ -105,32 +108,41 @@ export class Memory {
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = await this.idOf(ctx) // ObjId
+    ctx.id = id // Safe to pollute I guess.
     const value = tripWire(await this.readState(id)) // TODO: Copy?
-    const ectx = { id, ...ctx } // Extend context with ObjectID
+    const postpone = (time, errorMsg, retries = 3) => { throw new Error('TODO') }
+    // Set up rejection
+    let rejection = false
+    const reject = message => {
+      if (rejection) throw new Error('Block Already Rejected')
+      rejection = { [SymReject]: message || true }
+      return rejection
+    }
 
-    // Phase 0: Parse block and compute the new draft state
-    const draft = await this.compute(value, ectx)
+    const computeContext = {
+      ...ctx,
+      reject,
+      postpone,
+      lookup: async () => { throw new Error('TODO') }
+    }
 
-    // Phase 1: Validate the computed draft
-    const err = await this.validate(draft, {
-      ...ectx,
-      previous: value,
-      postpone: (time, errorMsg, retries = 3) => { throw new Error('TODO') },
-      lookup: () => { throw new Error('TODO') }
-    })
-    if (err) return err
+    const draft = await this.compute(value, computeContext)
+
+    if (rejection) return rejection[SymReject] // TODO: return entire rejection obj
+    if (draft[SymPostpone]) throw new Error('Postpone not implemented')
 
     // Phase 2: Apply the draft and run the post-apply hook
     await this._writeState(id, draft)
-    ectx.value = draft
-    await this.onapply(draft, {
-      ...ectx,
+    await this.postapply(draft, {
+      ...ctx,
       index: this.#index.bind(this, block.id),
+      // Signals have to be queued post-block exectution for all
+      // memorystores but before processing next block
       signal: () => { throw new Error('TODO') }
     })
 
     // Phase 3: Schedule deinitialization & increment reference counts
-    const expiresAt = await this.expiresAt(data.date, ectx)
+    const expiresAt = await this.expiresAt(data.date, { ...ctx, value: draft })
     if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
     await this._incrState(block.id)
@@ -184,8 +196,15 @@ export class Memory {
  * making it easy to sync changes across peers
  */
 export class CRDTMemory extends Memory {
-  compute (value, { data }) {
-    return applyPatch(value, data.diff)
+  async compute (value, computeContext) {
+    const { data } = computeContext
+    const draft = applyPatch(value, data.diff)
+    const res = await this.validate(draft, { previous: value, ...computeContext })
+
+    // This should prevent validate from doing
+    // anything else but validating.
+    if (res && (res[SymPostpone] || res[SymReject])) return res
+    else return draft
   }
 
   /**
