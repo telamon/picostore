@@ -60,11 +60,10 @@ test('PicoStore 3.x', async t => {
   t.is(nRefs, 0, 'Refcount zero')
 })
 
-solo('DVM3.x bidirectional memory refs', async t => {
+solo('DVM3.x Conways Game Of Hugs', async t => {
   const db = DB()
   const store = new Store(db)
   let receivedSignal = null
-  // --- let's implement conways game of hugs
   // CRDt Managed Memory
   const profiles = store.register('profile', class Profiles extends CRDTMemory {
     initialValue = { name: '', hp: 3, sent: 0, accepted: 0, rejected: 0 }
@@ -163,7 +162,6 @@ solo('DVM3.x bidirectional memory refs', async t => {
       const branch = await this.store.readBranch(hugId)
       const data = encode({ root: 'hugs', type: 'response', ok, date: Date.now() })
       branch.append(data, secret)
-      branch.inspect()
       return this.store.dispatch(branch, true)
     }
   })
@@ -179,8 +177,8 @@ solo('DVM3.x bidirectional memory refs', async t => {
   // t.ok(cmp(sigHEAD, feed.last.id))
 
   const feedB = await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
-  feedA.inspect()
-  feedB.inspect()
+  // feedA.inspect()
+  // feedB.inspect()
   const f2 = await hugs.createHug(B.pk, A.sk)
   const f3 = await hugs.respondHug(f2.last.id, B.sk)
   // Signal should have been fired and trapped
