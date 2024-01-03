@@ -64,7 +64,7 @@ solo('DVM3.x bidirectional memory refs', async t => {
   const db = DB()
   const store = new Store(db)
   let receivedSignal = null
-
+  // --- let's implement conways game of hugs
   // CRDt Managed Memory
   const profiles = store.register('profile', class Profiles extends CRDTMemory {
     initialValue = { name: '', hp: 3, sent: 0, accepted: 0, rejected: 0 }
@@ -80,10 +80,8 @@ solo('DVM3.x bidirectional memory refs', async t => {
     }
 
     expiresAt (date, { value }) {
-      return date + value.hp * (20*60000) // All creatures die without hugs
+      return date + value.hp * (20 * 60000) // All creatures die without hugs
     }
-
-    // CRDtMemory implements reduce and sweep
 
     async trap (signal, payload, mutate) {
       receivedSignal = signal
@@ -102,17 +100,18 @@ solo('DVM3.x bidirectional memory refs', async t => {
 
   // Custom Instruction Memory
   const hugs = store.register('hugs', class Hugs extends Memory {
-    idOf ({ data, block, parent }) {
+    idOf ({ data, block, parentBlock }) {
       if (data.type === 'hug') return block.id
-      if (data.type === 'response') return parent.id
+      if (data.type === 'response') return parentBlock.id
       // Else await lookup(HeadOf)
     }
 
     async compute (currentValue, { data, AUTHOR, block, postpone, reject, lookup }) {
       if (data.type === 'hug') {
+        const to = toHex(data.target)
         // Validate block
         if (block.genesis) return reject('NoAnonymousHugs')
-        if (toHex(data.target) === AUTHOR) return reject('NoSelfhugs')
+        if (to === AUTHOR) return reject('NoSelfhugs')
 
         // Secondary Index lookups: hugsByAuthor[author] => block-id
         const lastHug = await this.readState(await lookup(AUTHOR))
@@ -123,10 +122,11 @@ solo('DVM3.x bidirectional memory refs', async t => {
         if (!peer) return postpone(10000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
 
         // Return new state
-        return { ...currentValue, from: AUTHOR, to: data.target, status: 'pending' }
+        return { ...currentValue, from: AUTHOR, to, status: 'pending' }
       } else if (data.type === 'response') {
         // Validate block
-        if (currentValue.to !== AUTHOR) return reject('NotYourHug')
+        const blockAuthor = toHex(block.key) // AUTHOR is a tag referecing blockRoot, not author of block
+        if (currentValue.to !== blockAuthor) return reject('NotYourHug')
         if (![true, false].includes(data.ok)) return reject('InvalidResponse')
         // Return new state
         return { ...currentValue, status: data.ok ? 'accepted' : 'rejected' }
@@ -141,6 +141,13 @@ solo('DVM3.x bidirectional memory refs', async t => {
       else signal('hug-settled', { to, from, status }) // PHASE: on-apply
     }
 
+    async expiresAt (blockDate, { value }) {
+      // Wishlist: 1. attach expriation to other object (profile)
+      // 2. Mark as weak-ref; Expires in state @N-time or blockroot is expunged.
+      if (value.status === 'pending') return blockDate + 5 * 60000 // 5-minutes timeout
+      else return blockDate + 3 * 60 * 60000 // 3-hours / prevent re-hugs
+    }
+
     async sweep ({ id, AUTHOR, deIndex }) {
       await deIndex(AUTHOR) // Release Hug-cap
     }
@@ -149,7 +156,15 @@ solo('DVM3.x bidirectional memory refs', async t => {
       const branch = await this.store.readBranch(getPublicKey(secret))
       const data = encode({ root: 'hugs', type: 'hug', target: toU8(target), date: Date.now() })
       branch.append(data, secret)
-      return this.store.dispatch(branch)
+      return this.store.dispatch(branch, true)
+    }
+
+    async respondHug (hugId, secret, ok = true) {
+      const branch = await this.store.readBranch(hugId)
+      const data = encode({ root: 'hugs', type: 'response', ok, date: Date.now() })
+      branch.append(data, secret)
+      branch.inspect()
+      return this.store.dispatch(branch, true)
     }
   })
 
@@ -158,7 +173,7 @@ solo('DVM3.x bidirectional memory refs', async t => {
   const B = Feed.signPair()
   const feedA = await profiles.mutate(null, p => ({ ...p, name: 'alice' }), A.sk)
   const objId = A.pk // Bad example: We know that blockRoot === ObjectId
-  const sigHEAD = await profiles.blockRootOf(objId) // TODO: undefined
+  // const sigHEAD = await profiles.blockRootOf(objId) // TODO: undefined
   const feed = await store.readBranch(A.pk)
   t.is(feed.diff(feedA), 0)
   // t.ok(cmp(sigHEAD, feed.last.id))
@@ -167,9 +182,10 @@ solo('DVM3.x bidirectional memory refs', async t => {
   feedA.inspect()
   feedB.inspect()
   const f2 = await hugs.createHug(B.pk, A.sk)
+  const f3 = await hugs.respondHug(f2.last.id, B.sk)
   // Signal should have been fired and trapped
   t.is(receivedSignal, 'hug-settled')
-  f2.inspect()
+  f3.inspect()
 })
 
 test('PicoStore 2.x scenario', async t => {

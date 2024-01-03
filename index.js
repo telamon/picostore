@@ -14,18 +14,21 @@ const SymReject = Symbol.for('pDVM::reject')
 /** @typedef {u8|hexstring} Signature */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
 /** @typedef {import('picofeed').PublicKey} PublicKey */
-/** @typedef {{
+/**
+    @typedef {{ [SymReject]: true, message?: string, silent: boolean }} Rejection
+    @typedef {{ [SymPostpone]: true, message?: string, time: number, retries: number }} Reschedule
+    @typedef {{
       block: Block,
       parentBlock: Block,
-      AUTHOR: PublicKey,
-      CHAIN: BlockID,
+      AUTHOR: hexstring,
+      CHAIN: hexstring,
       data: any
     }} DispatchContext
 
     // Root of the problem
     @typedef { DispatchContext & {
-      reject: (message) => SymReject,
-      postpone: (timeMillis: number, errorMsg: string, nTries: 3) => SymPostpone,
+      reject: (message) => Rejection,
+      postpone: (timeMillis: number, errorMsg: string, nTries: 3) => Reschedule,
       signal: (name: string, payload: any) => void,
       lookup: (key: u8|string) => Promise<BlockID>
     }} ComputeContext
@@ -70,7 +73,7 @@ export class Memory {
   async expiresAt (ctx) { return Infinity } // eslint-disable-line no-unused-vars
   /** @param {any} value Current state
     * @param {ComputeContext} ctx
-    * @returns {Rejection|Postpone|Draft} The new draft state */
+    * @returns {Promise<Rejection|Reschedule|any>} The new value */
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
   async postapply (value, ctx) { }
 
@@ -93,13 +96,14 @@ export class Memory {
   /**
    * Index a block using a secondary-key
    */
-  async #index (blockId, pKey) {
-    /*const k = new Uint8Array(blockId.length + 3)
-    k.set(toU8('iPK'))
-    k.set(toU8(pKey), 3)*/
-    const k = ccat(toU8('iPK'), toU8(pKey))
-    debugger
+  async #index (secondaryKey, blockId) {
+    const k = ccat(toU8('sIdx'), toU8(this.name), toU8(secondaryKey))
     await this.store.repo.writeReg(k, toU8(blockId))
+  }
+
+  async #lookup (secondaryKey) {
+    const k = ccat(toU8('sIdx'), toU8(this.name), toU8(secondaryKey))
+    return this.store.repo.readReg(k)
   }
 
   /** @param {DispatchContext} ctx */
@@ -110,38 +114,39 @@ export class Memory {
     const id = await this.idOf(ctx) // ObjId
     ctx.id = id // Safe to pollute I guess.
     const value = tripWire(await this.readState(id)) // TODO: Copy?
-    const postpone = (time, errorMsg, retries = 3) => { throw new Error('TODO') }
-    // Set up rejection
-    let rejection = false
+    // Phase0: Set up mutually exclusive rejection/postpone flow-control.
+    let abortMerge = false
     const reject = message => {
-      if (rejection) throw new Error('Block Already Rejected')
-      rejection = { [SymReject]: message || true }
-      return rejection
+      if (abortMerge) throw new Error(`Merge already rejected: ${abortMerge.message}`)
+      abortMerge = { [SymReject]: true, message, silent: !message }
+      return abortMerge
     }
-
-    const computeContext = {
+    const postpone = (time, message, retries = 3) => {
+      if (abortMerge) throw new Error(`Merge already rejected: ${abortMerge.message}`)
+      abortMerge = { [SymPostpone]: true, message, time, retries }
+    }
+    // Phase1: Compute State change
+    const computeContext = /** @type {ComputeContext} */ {
       ...ctx,
       reject,
       postpone,
-      lookup: async () => { throw new Error('TODO') }
+      lookup: key => this.#lookup(key)
     }
-
     const draft = await this.compute(value, computeContext)
 
-    if (rejection) return rejection[SymReject] // TODO: return entire rejection obj
-    if (draft[SymPostpone]) throw new Error('Postpone not implemented')
+    if (abortMerge) return abortMerge
 
-    // Phase 2: Apply the draft and run the post-apply hook
+    // Phase2: Apply the draft and run the post-apply hook
     await this._writeState(id, draft)
     await this.postapply(draft, {
       ...ctx,
-      index: this.#index.bind(this, block.id),
+      index: key => this.#index(key, block.id),
       // Signals have to be queued post-block exectution for all
       // memorystores but before processing next block
       signal: () => { throw new Error('TODO') }
     })
 
-    // Phase 3: Schedule deinitialization & increment reference counts
+    // Phase3: Schedule deinitialization & increment reference counts
     const expiresAt = await this.expiresAt(data.date, { ...ctx, value: draft })
     if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
@@ -179,14 +184,6 @@ export class Memory {
     this.version = version
     this.head = head
     this.store._notify('change', { root: this.name })
-  }
-
-  /**
-   * Resolves HEAD-ptr of the chain for a given Object-Id
-   * Rename to headOf(ObjectID) ?
-   */
-  async blockRootOf (objId) {
-    // TODO: not implemented
   }
 }
 
@@ -240,7 +237,7 @@ function mkRefKey (blockRoot, stateRoot, objId = null) {
   k.set(b, 0)
   if (stateRoot === Infinity) for (let i = 0; i < 12; i++) k[b.length + i] = 0xff
   else if (s) k.set(s, b.length)
-  if (objId) k.set(toU8(objId), b.length + 12)
+  if (objId) k.set(toU8(objId).subarray(0, 32), b.length + 12)
   return k
 }
 
@@ -445,22 +442,32 @@ export default class Store {
       const data = decode(block.body) // TODO: Support multi-root blocks?
       const collection = this.roots[data.root]
       if (!collection) throw new Error('UnknownCollection' + data.root)
-      const validationError = await collection._validateAndMutate({
+      const abort = await collection._validateAndMutate({
         data,
         block,
         parentBlock,
         ...tags
       })
-      // Abort merging // TODO: What was `loud`-flag again?
-      if (typeof validationError === 'string') throw new Error(`InvalidBlock: ${validationError}`)
-      else if (validationError === true) return merged.length ? Feed.from(merged) : undefined
+      if (abort) {
+        if (abort[SymReject]) {
+          // Loud should be set when locally produced blocks are dispatched.
+          if (loud && !abort.silent) throw new Error(`InvalidBlock: ${abort.message}`)
+        } else if (abort[SymPostpone]) {
+          console.error('TODO: Implement retries of postponed blocks')
+          // TODO: schedule block-id with gc/scheduler to reattempt
+          // merge in validationError.time -seconds.
+          // usecase: Missing cross-chain weak-reference. (action depends on secondary profile or something)
+        }
+        break // Abort merge loop and release locks
+      }
       parentBlock = block
-      const m = await this.repo.merge(block, this._strategy) // TODO: batch merge?
-      if (!m && loud) console.warn('RejectedByBucket: MergeStrategy failed')
+      const nMerged = await this.repo.merge(block, this._strategy) // TODO: batch merge?
+      // nMerged is 0 when repo rejects a block, at this stage it must not be rejected.
+      if (!nMerged) throw new Error('[CRITICAL] MergeStrategy failed! state and blockstore is desynced. Fix bug and store.reload()')
       this._notify('merged', { block, root: data.root })
       merged.push(block)
     }
-    return Feed.from(merged)
+    if (merged.length) return Feed.from(merged)
   }
 
   /**
