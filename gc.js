@@ -34,7 +34,7 @@ export default class GarbageCollector { // What's left is the scheduler
       gt: new Uint8Array(9), // All zeroes
       lt: mkKey(now, 0xff)
     }
-    D('sweep range:', query.gt.toString('hex'), '...', query.lt.toString('hex'))
+    D('sweep range:', toHex(query.gt), '...', toHex(query.lt))
     const iter = this.db.iterator(query)
     const result = []
     const batch = []

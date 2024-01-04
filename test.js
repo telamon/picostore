@@ -1,11 +1,11 @@
 import { test, skip, solo } from 'brittle'
-import { Feed, toHex, toU8, getPublicKey } from 'picofeed'
+import { Feed, toU8 } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
-import { encode } from 'cborg'
+import { createGame } from './example_cgoh.js'
 import { get } from 'piconuro'
-// import { inspect } from 'picorepo/dot.js'
-// import { writeFileSync } from 'node:fs'
-import Store, { Memory, CRDTMemory } from './index.js'
+import { inspect } from 'picorepo/dot.js'
+import { writeFileSync } from 'node:fs'
+import Store from './index.js'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -63,115 +63,7 @@ test('PicoStore 3.x', async t => {
 solo('DVM3.x Conways Game Of Hugs', async t => {
   const db = DB()
   const store = new Store(db)
-  let receivedSignal = null
-  // CRDt Managed Memory
-  const profiles = store.register('profile', class Profiles extends CRDTMemory {
-    initialValue = { name: '', hp: 3, sent: 0, accepted: 0, rejected: 0 }
-
-    idOf ({ AUTHOR }) { // Only one profile per Public key
-      return AUTHOR // return blockRoot
-    }
-
-    validate (value, { previous, reject }) {
-      console.log(value)
-      if (previous.name === '' && typeof value.name === 'undefined') return reject('NameMustBeSet')
-      if (previous.name !== '' && previous.name !== value.name) return reject('NameChangeNotPermitted')
-    }
-
-    expiresAt ({ date, hp }) {
-      return date + hp * (20 * 60000) // All creatures die without hugs
-    }
-
-    async trap (signal, payload, mutate) {
-      receivedSignal = signal
-      if (signal !== 'hug-settled') return
-      const { status, from, to } = payload
-      // This is where it becomes problematic / breaks CRDT behaviour
-      if (status === 'accepted') {
-        await mutate(from, s => ({ ...s, hp: s.hp + 1.5, sent: s.sent + 1 }))
-        await mutate(to, s => ({ ...s, hp: s.hp + 1.5, accepted: s.accepted + 1 }))
-      } else {
-        await mutate(from, s => ({ ...s, hp: s.hp - 0.3, sent: s.sent + 1 }))
-        await mutate(to, s => ({ ...s, hp: s.hp + 2, rejected: s.rejected + 1 }))
-      }
-    }
-  })
-
-  // Custom Instruction Memory
-  const hugs = store.register('hugs', class Hugs extends Memory {
-    idOf ({ data, block, parentBlock }) {
-      if (data.type === 'hug') return block.id
-      if (data.type === 'response') return parentBlock.id
-      // Else await lookup(HeadOf)
-    }
-
-    async compute (currentValue, { data, AUTHOR, block, postpone, reject, lookup }) {
-      if (data.type === 'hug') {
-        const to = toHex(data.target)
-        // Validate block
-        if (block.genesis) return reject('NoAnonymousHugs')
-        if (to === AUTHOR) return reject('NoSelfhugs')
-
-        // Secondary Index lookups: hugsByAuthor[author] => block-id
-        const lastHug = await this.readState(await lookup(AUTHOR))
-        if (lastHug?.status === 'pending') return reject('CannotInitiateWhilePending')
-
-        // Cross memory lookups
-        const peer = await profiles.readState(data.target) // referencing "profiles" collection
-        if (!peer) return postpone(10000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
-
-        // Return new state
-        return { ...currentValue, from: AUTHOR, to, status: 'pending', date: data.date }
-      } else if (data.type === 'response') {
-        // Validate block
-        const blockAuthor = toHex(block.key) // AUTHOR is a tag referecing blockRoot, not author of block
-        if (currentValue.to !== blockAuthor) return reject('NotYourHug')
-        if (![true, false].includes(data.ok)) return reject('InvalidResponse')
-        // Return new state
-        return { ...currentValue, status: data.ok ? 'accepted' : 'rejected', date: data.date }
-      } else {
-        return reject('InvalidType')
-      }
-    }
-
-    async postapply (value, { AUTHOR, id, signal, index }) {
-      const { status, to, from } = value
-      if (status === 'pending') await index(AUTHOR, id) // PHASE: on-apply
-      else signal('hug-settled', { to, from, status }) // PHASE: on-apply
-    }
-
-    async expiresAt (value, latch) {
-      const { status, to, from, date } = value
-      if (status === 'pending') return date + 5 * 60000 // 5-minutes timeout
-      const lastPeerOut = Math.max(
-        await latch('profile', to),
-        await latch('profile', from)
-      )
-      return Math.min(
-        date + 3 * 60 * 60000, // 3-hours / prevent re-hugs
-        lastPeerOut // Or expire when last peer is collected
-      )
-    }
-
-    async sweep ({ id, AUTHOR, deIndex }) {
-      await deIndex(AUTHOR) // Release Hug-cap
-    }
-
-    async createHug (target, secret) {
-      const branch = await this.store.readBranch(getPublicKey(secret))
-      const data = encode({ root: 'hugs', type: 'hug', target: toU8(target), date: Date.now() })
-      branch.append(data, secret)
-      return this.store.dispatch(branch, true)
-    }
-
-    async respondHug (hugId, secret, ok = true) {
-      const branch = await this.store.readBranch(hugId)
-      const data = encode({ root: 'hugs', type: 'response', ok, date: Date.now() })
-      branch.append(data, secret)
-      return this.store.dispatch(branch, true)
-    }
-  })
-
+  const [profiles, hugs] = createGame(store)
   await store.load()
   const A = Feed.signPair()
   const B = Feed.signPair()
@@ -185,16 +77,22 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
   await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
   const f2 = await hugs.createHug(B.pk, A.sk)
   await hugs.respondHug(f2.last.id, B.sk)
-  // Signal should have been fired and trapped
-  t.is(receivedSignal, 'hug-settled')
 
   const hugAB = Object.values(hugs.state)[0]
   t.is(hugAB.status, 'accepted')
   for (const profile of Object.values(profiles.state)) {
     t.is(profile.hp, 4.5, `${profile.name} hp increased`)
   }
+  writeFileSync('repo.dot', await inspect(store.repo))
   // This is tiring but now the most important part, run GC witness deinitalization
   await store.gc(Date.now() + 9000000)
+  console.log('SECOND PASS')
+  await store._dumpReferences()
+  console.log(profiles.state)
+  // TODO: Taking a break, second profile does not get garbage collected,
+  // reason seems to be that it's not visited, we lost a timer?
+  await store.gc(Date.now() + 9000000, true) // TODO: add force true to visit all objects?
+  writeFileSync('after.dot', await inspect(store.repo))
   debugger
 })
 

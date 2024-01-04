@@ -119,9 +119,9 @@ export class Memory {
   }
 
   /** @param {DispatchContext} ctx Context containing identified chain tags
-    * @returns {Promise<{[SymReject]: true}|{[SymPostpone]: true}|Array<Sigint>>} Store alteration result */
+    * @returns {Promise<Rejection|Reschedule|Array<Sigint>>} Store alteration result */
   async _validateAndMutate (ctx) {
-    const { data, block, AUTHOR, CHAIN } = ctx
+    const { block, AUTHOR, CHAIN } = ctx
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = await this.idOf(ctx) // ObjId
@@ -268,7 +268,7 @@ export class CRDTMemory extends Memory {
 
 /**
  * @param {hexstring|Uint8Array} blockRoot
- * @param {string} stateRoot
+ * @param {string|0|Infinity} stateRoot
  * @param {hexstring|Uint8Array} objId
  */
 function mkRefKey (blockRoot, stateRoot, objId = null) {
@@ -351,6 +351,14 @@ export default class Store {
     let c = 0
     for await (const _ of iter) c++ // eslint-disable-line no-unused-vars
     return c
+  }
+
+  /** Debug utility; dumps reference registry to console */
+  async _dumpReferences (log = console.info) {
+    const iter = this._refReg.iterator()
+    for await (const [key, value] of iter)  {
+      log(toHex(key.subarray(0, 32)), '=>', decode(value))
+    }
   }
 
   /** Fetches a writable feed
