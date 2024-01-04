@@ -38,6 +38,7 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       index: (key: u8|string) => Promise<Void>,
       signal: (name: string, payload: any) => void
     }} PostapplyContext
+    @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} Sigint
  */
 
 /**
@@ -79,17 +80,20 @@ export class Memory {
   async postapply (value, ctx) { }
 
   async readState (id) {
+    if (id instanceof Uint8Array) id = toHex(id)
     return id in this.#cache
       ? this.#cache[id]
       : this.initialValue
   }
 
   async _writeState (id, o) {
+    if (id instanceof Uint8Array) id = toHex(id)
     this.#cache[id] = o
     this.store._notify('change', { root: this.name, id, value: o })
   }
 
   async _sweepState (id) {
+    if (id instanceof Uint8Array) id = toHex(id)
     delete this.#cache[id]
     this.store._notify('change', { root: this.name, id, value: undefined })
   }
@@ -108,7 +112,7 @@ export class Memory {
   }
 
   /** @param {DispatchContext} ctx Context containing identified chain tags
-    * @returns {Promise<{[SymReject]: true}|{[SymPostpone]: true}|Array<{ [SymSignal]: true }>>} Store alteration result */
+    * @returns {Promise<{[SymReject]: true}|{[SymPostpone]: true}|Array<Sigint>>} Store alteration result */
   async _validateAndMutate (ctx) {
     const { data, block, AUTHOR, CHAIN } = ctx
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
@@ -145,14 +149,14 @@ export class Memory {
       ...ctx,
       index: key => this.#index(key, block.id),
       // Signals are executed between two block-states
-      signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, blockId: id })
+      signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, rootName: this.name })
     })
 
     // Phase3: Schedule deinitialization & increment reference counts
     const expiresAt = await this.expiresAt(data.date, { ...ctx, value: draft })
     if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
-    await this._incrState(block.id)
+    await this._incrState(block.id) // TODO: IncrState once on unlock
     return signals
   }
 
@@ -187,6 +191,26 @@ export class Memory {
     this.version = version
     this.head = head
     this.store._notify('change', { root: this.name })
+  }
+
+  /**
+   * @param {Sigint} signal an interrupt/signal
+   * @param {DispatchContext} context
+   */
+  async _trap (signal, ctx) {
+    if (typeof this.trap !== 'function') return
+    const { type, payload } = signal
+    let didMutate = false
+    const mutate = async (id, callback) => {
+      const value = await this.readState(id)
+      const draft = await callback(value)
+      if (typeof draft === 'undefined') throw new Error('Expected mutate#callback() to return new state')
+      await this._writeState(id, draft)
+      didMutate = true
+    }
+    // TODO: signals/interrupt cannot increase refcounts as we do not provide any anti-signals
+    await this.trap(type, payload, mutate)
+    if (didMutate) await this._incrState(ctx.block.id) // TODO: IncrState once on unlock
   }
 }
 

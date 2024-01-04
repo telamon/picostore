@@ -176,14 +176,20 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
   t.is(feed.diff(feedA), 0)
   // t.ok(cmp(sigHEAD, feed.last.id))
 
-  const feedB = await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
-  // feedA.inspect()
-  // feedB.inspect()
+  await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
   const f2 = await hugs.createHug(B.pk, A.sk)
-  const f3 = await hugs.respondHug(f2.last.id, B.sk)
+  await hugs.respondHug(f2.last.id, B.sk)
   // Signal should have been fired and trapped
   t.is(receivedSignal, 'hug-settled')
-  f3.inspect()
+
+  const hugAB = Object.values(hugs.state)[0]
+  t.is(hugAB.status, 'accepted')
+  for (const profile of Object.values(profiles.state)) {
+    t.is(profile.hp, 4.5, `${profile.name} hp increased`)
+  }
+  // This is tiring but now the most important part, run GC witness deinitalization
+  await store.gc(Date.now() + 9000000)
+  debugger
 })
 
 test('PicoStore 2.x scenario', async t => {
