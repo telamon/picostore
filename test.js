@@ -78,8 +78,8 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
       if (previous.name !== '' && previous.name !== value.name) return reject('NameChangeNotPermitted')
     }
 
-    expiresAt (date, { value }) {
-      return date + value.hp * (20 * 60000) // All creatures die without hugs
+    expiresAt ({ date, hp }) {
+      return date + hp * (20 * 60000) // All creatures die without hugs
     }
 
     async trap (signal, payload, mutate) {
@@ -121,14 +121,14 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
         if (!peer) return postpone(10000, 'NoGhostHugs', 3) // Postpone upto 3 Times then RejectionMessage
 
         // Return new state
-        return { ...currentValue, from: AUTHOR, to, status: 'pending' }
+        return { ...currentValue, from: AUTHOR, to, status: 'pending', date: data.date }
       } else if (data.type === 'response') {
         // Validate block
         const blockAuthor = toHex(block.key) // AUTHOR is a tag referecing blockRoot, not author of block
         if (currentValue.to !== blockAuthor) return reject('NotYourHug')
         if (![true, false].includes(data.ok)) return reject('InvalidResponse')
         // Return new state
-        return { ...currentValue, status: data.ok ? 'accepted' : 'rejected' }
+        return { ...currentValue, status: data.ok ? 'accepted' : 'rejected', date: data.date }
       } else {
         return reject('InvalidType')
       }
@@ -140,11 +140,17 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
       else signal('hug-settled', { to, from, status }) // PHASE: on-apply
     }
 
-    async expiresAt (blockDate, { value }) {
-      // Wishlist: 1. attach expriation to other object (profile)
-      // 2. Mark as weak-ref; Expires in state @N-time or blockroot is expunged.
-      if (value.status === 'pending') return blockDate + 5 * 60000 // 5-minutes timeout
-      else return blockDate + 3 * 60 * 60000 // 3-hours / prevent re-hugs
+    async expiresAt (value, latch) {
+      const { status, to, from, date } = value
+      if (status === 'pending') return date + 5 * 60000 // 5-minutes timeout
+      const lastPeerOut = Math.max(
+        await latch('profile', to),
+        await latch('profile', from)
+      )
+      return Math.min(
+        date + 3 * 60 * 60000, // 3-hours / prevent re-hugs
+        lastPeerOut // Or expire when last peer is collected
+      )
     }
 
     async sweep ({ id, AUTHOR, deIndex }) {

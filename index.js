@@ -71,8 +71,10 @@ export class Memory {
 
   /** @param {DispatchContext} ctx */
   async idOf (ctx) { return this.store.repo.allowDetached ? ctx.CHAIN : ctx.AUTHOR }
-  /** @param {DispatchContext} ctx */
-  async expiresAt (ctx) { return Infinity } // eslint-disable-line no-unused-vars
+  /** @param {any} value The current state
+   *  @param {(root:string, id: ObjId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
+   *  @returns {Promise<number|Infinity>} */
+  async expiresAt (value, latch) { return Infinity }
   /** @param {any} value Current state
     * @param {ComputeContext} ctx
     * @returns {Promise<Rejection|Reschedule|any>} The new value */
@@ -84,6 +86,11 @@ export class Memory {
     return id in this.#cache
       ? this.#cache[id]
       : this.initialValue
+  }
+
+  async hasState (id) {
+    if (id instanceof Uint8Array) id = toHex(id)
+    return id in this.#cache
   }
 
   async _writeState (id, o) {
@@ -153,23 +160,30 @@ export class Memory {
     })
 
     // Phase3: Schedule deinitialization & increment reference counts
-    const expiresAt = await this.expiresAt(data.date, { ...ctx, value: draft })
-    if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
+    const latch = this.store._latchExpireAt.bind(this.store, 0)
+    const exp = await this.expiresAt(draft, latch)
+    if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
+    if (exp !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, exp)
     await this.store._refIncrement(blockRoot, this.name, id)
     await this._incrState(block.id) // TODO: IncrState once on unlock
     return signals
   }
 
   async _gc_visit (gcDate, memo) {
-    const { root, id, date, blockRoot } = memo
+    const { root, id, blockRoot } = memo
     if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
-    const expiresAt = this.config.expiresAt(date, memo)
-    if (expiresAt <= gcDate) {
+    if (!(await this.hasState(id))) return console.info('_gc_visit', this.name, toHex(toU8(id)), 'already swept')
+    const value = await this.readState(id)
+    const latch = this.store._latchExpireAt.bind(this.store, 0)
+    const exp = await this.expiresAt(value, latch)
+    if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
+    console.info('_gc_visit', this.name, exp - gcDate, value)
+    if (exp <= gcDate) {
       await this._sweepState(id)
       this.#version++
       return await this.store._refDecrement(blockRoot, this.name, id)
-    } else if (expiresAt !== Infinity) { // Reschedule
-      await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
+    } else if (exp !== Infinity) { // Reschedule
+      await this.store._gc.schedule(this.name, blockRoot, id, exp)
     }
   }
 
@@ -223,8 +237,8 @@ export class CRDTMemory extends Memory {
   async compute (value, computeContext) {
     const { data } = computeContext
     const draft = applyPatch(value, data.diff)
+    draft.date = data.date
     const res = await this.validate(draft, { previous: value, ...computeContext })
-
     // This should prevent validate from doing
     // anything else but validating.
     if (res && (res[SymPostpone] || res[SymReject])) return res
@@ -572,6 +586,20 @@ export default class Store {
     if (!this.intervalId) return
     clearInterval(this.intervalId)
     this.intervalId = null
+  }
+
+  async _latchExpireAt (depth, rootName, id) {
+    if (depth > 5) return Infinity
+    console.log('Latch, called', rootName, id)
+    if (id instanceof Uint8Array) id = toHex(id)
+    const root = /** @type {Memory} */ this.roots[rootName]
+    if (!root) throw new Error(`Cannot latch, memory ${rootName} does not exist`)
+    if (!(await root.hasState(id))) return 0 // Object is gone
+    const value = await root.readState(id)
+    const latch = this._latchExpireAt.bind(this, ++depth)
+    const exp = await root.expiresAt(value, latch)
+    if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${rootName}.expiresAt() to return number|Infinity, got ${exp}`)
+    return exp
   }
 }
 
