@@ -172,17 +172,18 @@ export class Memory {
   async _gc_visit (gcDate, memo) {
     const { root, id, blockRoot } = memo
     if (root !== this.name) throw new Error(`WrongCollection: ${root}`)
-    if (!(await this.hasState(id))) return console.info('_gc_visit', this.name, toHex(toU8(id)), 'already swept')
+    if (!(await this.hasState(id))) return // console.info('_gc_visit', this.name, toHex(toU8(id)), 'already swept')
     const value = await this.readState(id)
     const latch = this.store._latchExpireAt.bind(this.store, 0)
     const exp = await this.expiresAt(value, latch)
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
-    console.info('_gc_visit', this.name, exp - gcDate, value)
+    // console.info('_gc_visit', this.name, exp - gcDate, value)
     if (exp <= gcDate) {
       await this._sweepState(id)
       this.#version++
       return await this.store._refDecrement(blockRoot, this.name, id)
     } else if (exp !== Infinity) { // Reschedule
+      // console.log('Rescheduling', this.name, toHex(blockRoot), id, exp)
       await this.store._gc.schedule(this.name, blockRoot, id, exp)
     }
   }
@@ -598,7 +599,7 @@ export default class Store {
 
   async _latchExpireAt (depth, rootName, id) {
     if (depth > 5) return Infinity
-    console.log('Latch, called', rootName, id)
+    // console.log('Latch, called', rootName, id)
     if (id instanceof Uint8Array) id = toHex(id)
     const root = /** @type {Memory} */ this.roots[rootName]
     if (!root) throw new Error(`Cannot latch, memory ${rootName} does not exist`)

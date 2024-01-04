@@ -74,7 +74,6 @@ export default class GarbageCollector { // What's left is the scheduler
 }
 
 let _ctr = 0
-let _lastDate = 0
 /**
  * Creates a binary LevelDB key indexes tasks by
  * Timestamp.
@@ -91,11 +90,8 @@ function mkKey (date, counter) {
   else {
     // Automatic counter '_ctr' prevents task-overwrites
     // when mkKey invoked within same millisecond.
-    if (date === _lastDate) _ctr++
-    else _ctr = 0
-    _lastDate = date
-    if (_ctr > 255) console.warn('Warning: >255 GC-tasks enqueued, systemfault?')
-    b[8] = _ctr % 256
+    _ctr = (1 + _ctr) % 256
+    b[8] = _ctr
   }
   return b
 }

@@ -86,14 +86,8 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
   writeFileSync('repo.dot', await inspect(store.repo))
   // This is tiring but now the most important part, run GC witness deinitalization
   await store.gc(Date.now() + 9000000)
-  console.log('SECOND PASS')
-  await store._dumpReferences()
-  console.log(profiles.state)
-  // TODO: Taking a break, second profile does not get garbage collected,
-  // reason seems to be that it's not visited, we lost a timer?
-  await store.gc(Date.now() + 9000000, true) // TODO: add force true to visit all objects?
-  writeFileSync('after.dot', await inspect(store.repo))
-  debugger
+  t.is(Object.values(profiles.state).length, 0, 'Profiles Cleared')
+  t.is(Object.values(hugs.state).length, 0, 'Hugs Cleared')
 })
 
 test('PicoStore 2.x scenario', async t => {
