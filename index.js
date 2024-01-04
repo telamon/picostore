@@ -4,8 +4,9 @@ import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
-const SymPostpone = Symbol.for('pDVM::postpone')
-const SymReject = Symbol.for('pDVM::reject')
+const SymPostpone = Symbol.for('PiC0VM::postpone')
+const SymReject = Symbol.for('PiC0VM::reject')
+const SymSignal = Symbol.for('PiC0VM::signal')
 /** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -106,7 +107,8 @@ export class Memory {
     return this.store.repo.readReg(k)
   }
 
-  /** @param {DispatchContext} ctx */
+  /** @param {DispatchContext} ctx Context containing identified chain tags
+    * @returns {Promise<{[SymReject]: true}|{[SymPostpone]: true}|Array<{ [SymSignal]: true }>>} Store alteration result */
   async _validateAndMutate (ctx) {
     const { data, block, AUTHOR, CHAIN } = ctx
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
@@ -138,12 +140,12 @@ export class Memory {
 
     // Phase2: Apply the draft and run the post-apply hook
     await this._writeState(id, draft)
+    const signals = []
     await this.postapply(draft, {
       ...ctx,
       index: key => this.#index(key, block.id),
-      // Signals have to be queued post-block exectution for all
-      // memorystores but before processing next block
-      signal: () => { throw new Error('TODO') }
+      // Signals are executed between two block-states
+      signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, blockId: id })
     })
 
     // Phase3: Schedule deinitialization & increment reference counts
@@ -151,6 +153,7 @@ export class Memory {
     if (expiresAt !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this.store._refIncrement(blockRoot, this.name, id)
     await this._incrState(block.id)
+    return signals
   }
 
   async _gc_visit (gcDate, memo) {
@@ -436,38 +439,53 @@ export default class Store {
       }
     }
 
-    /// Merge DSTATE-roots
+    // Merge DSTATE-roots
     const merged = []
     for (const block of patch.blocks.slice(-diff)) {
       const data = decode(block.body) // TODO: Support multi-root blocks?
       const collection = this.roots[data.root]
       if (!collection) throw new Error('UnknownCollection' + data.root)
-      const abort = await collection._validateAndMutate({
-        data,
-        block,
-        parentBlock,
-        ...tags
-      })
-      if (abort) {
-        if (abort[SymReject]) {
-          // Loud should be set when locally produced blocks are dispatched.
-          if (loud && !abort.silent) throw new Error(`InvalidBlock: ${abort.message}`)
-        } else if (abort[SymPostpone]) {
-          console.error('TODO: Implement retries of postponed blocks')
-          // TODO: schedule block-id with gc/scheduler to reattempt
-          // merge in validationError.time -seconds.
-          // usecase: Missing cross-chain weak-reference. (action depends on secondary profile or something)
-        }
-        break // Abort merge loop and release locks
-      }
+      /** @type{DispatchContext} */
+      const dispatchContext = { data, block, parentBlock, ...tags }
+      const success = await this._processBlock(collection, dispatchContext, loud)
+      if (!success) break // Abort merge on first failed block
       parentBlock = block
-      const nMerged = await this.repo.merge(block, this._strategy) // TODO: batch merge?
-      // nMerged is 0 when repo rejects a block, at this stage it must not be rejected.
-      if (!nMerged) throw new Error('[CRITICAL] MergeStrategy failed! state and blockstore is desynced. Fix bug and store.reload()')
-      this._notify('merged', { block, root: data.root })
       merged.push(block)
     }
     if (merged.length) return Feed.from(merged)
+  }
+
+  /**
+   * Logic used by dispatch & reload
+   * @param {Memory} collection
+   * @param {DispatchContext} dispatchContext
+   * @return {Promise<boolean>}
+   */
+  async _processBlock (collection, dispatchContext, loud = false) {
+    const { block, data } = dispatchContext
+    const res = await collection._validateAndMutate(dispatchContext)
+    if (!Array.isArray(res)) { // If not Array<Signal> it's an error
+      if (res[SymReject]) {
+        // Loud should be set when locally produced blocks are dispatched.
+        if (loud && !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
+      } else if (res[SymPostpone]) {
+        console.error('TODO: Implement retries of postponed blocks')
+        // TODO: schedule block-id with gc/scheduler to reattempt
+        // merge in validationError.time -seconds.
+        // usecase: Missing cross-chain weak-reference. (action depends on secondary profile or something)
+      }
+      return false
+    }
+    const nMerged = await this.repo.merge(block, this._strategy) // TODO: batch merge?
+    // nMerged is 0 when repo rejects a block, at this stage it must not be rejected.
+    if (!nMerged) throw new Error('[CRITICAL] MergeStrategy failed! state and blockstore is desynced. Fix bug and store.reload()')
+    this._notify('merged', { block, root: data.root })
+
+    // Last phase run signals
+    for (const sig of res) {
+      for (const name in this.roots) this.roots[name]._trap(sig, dispatchContext)
+    }
+    return true
   }
 
   /**
@@ -476,39 +494,30 @@ export default class Store {
   async reload () {
     return this._lockRun(async () => {
       const feeds = await this.repo.listFeeds()
-
       for (const root in this.roots) {
         const collection = this.roots[root]
         collection.state = {}
         collection.version = 0
         collection.head = undefined
       }
-
       const modified = new Set()
       for (const { key: ptr, value: CHAIN } of feeds) {
         const part = await this.repo.loadFeed(ptr)
-        const tags = {
-          AUTHOR: part.first.key,
-          CHAIN
-        }
+        const tags = { AUTHOR: part.first.key, CHAIN }
         let parentBlock = null
         for (const block of part.blocks) {
           const data = decode(block.body) // TODO: Support multi-root blocks?
           const collection = this.roots[data.root]
-          if (!collection) throw new Error('UnknownCollection' + data.root)
-          const validationError = await collection._validateAndMutate({
-            data,
-            block,
-            parentBlock,
-            ...tags
-          })
-          if (validationError) throw new Error(`InvalidBlock during reload: ${validationError}`)
-          this._notify('reload', { block, root: data.root })
+          /** @type{DispatchContext} */
+          const dispatchContext = { data, block, parentBlock, ...tags }
+          const success = await this._processBlock(collection, dispatchContext, true) // Force loud
+          if (!success) throw new Error('InvalidBlock during reload')
           parentBlock = block
+          this._notify('reload', { block, root: data.root })
           modified.add(data.root)
         }
       }
-      return Array.from(modified)
+      return Array.from(modified) // old api
     })
   }
 
@@ -540,78 +549,6 @@ export default class Store {
     clearInterval(this.intervalId)
     this.intervalId = null
   }
-
-  /*
-  async _mutateState (block, parentBlock, tags, dryMerge = false, loud = false) {
-    const modified = []
-
-    // Generate list of stores that want to reduce this block
-    const stores = []
-    for (const store of this._stores) {
-      if (typeof store.validator !== 'function') continue
-      if (typeof store.reducer !== 'function') continue
-      const root = this.state
-      const rejected = store.validator({ block, parentBlock, state: store.value, root, ...tags })
-      if (rejected) continue
-      stores.push(store)
-    }
-
-    // Attempt repo.merge if at least one store accepts block
-    if (stores.length) {
-      const merged = await this.repo.merge(block, this._strategy)
-      if (!dryMerge && !merged) {
-        if (loud) console.warn('RejectedByBucket: MergeStrategy failed')
-        return modified // Rejected by bucket
-      }
-    }
-
-    // Interrupts are buffered until after the mutations have run
-    const interrupts = []
-    const signal = (i, p) => interrupts.push([i, p])
-
-    // Run all state reducers
-    for (const store of stores) {
-      // If repo accepted the change, apply it
-      const mark = (payload, date) => this._gc.schedule(store.name, tags, block, payload, date)
-      const root = this.state
-      const context = {
-        // blocks
-        block,
-        parentBlock,
-        // AUTHOR & CHAIN
-        ...tags,
-        // state
-        state: store.value,
-        root,
-        // helpers
-        signal,
-        mark
-      }
-      const val = store.reducer(context)
-      if (typeof val === 'undefined') console.warn('Reducer returned `undefined` state.')
-      await this._commitHead(store, block.sig, val)
-      modified.push(store.name)
-    }
-    // DISABLED 4 NOW
-    // Run all traps in signal order
-    // NOTE: want to avoid reusing term 'signal' as it's a function
-    // TODO: rewrite to while(interrupts.length) to let traps re-signal
-    // TODO: max-interrupts counter of 255 to throw and avoid overuse
-    for (const [code, payload] of interrupts) {
-      for (const store of this._stores) {
-        if (typeof store.trap !== 'function') continue
-        const root = this.state
-        const val = store.trap({ code, payload, block, parentBlock, state: store.value, root, ...tags })
-        if (typeof val === 'undefined') continue // undefined equals no change
-        await this._commitHead(store, block.sig, val)
-        modified.push(store.name)
-      }
-    }
-    if (typeof this._tap === 'function') {
-      for (const [code, payload] of interrupts) this._tap(code, payload)
-    }
-    return modified
-  } */
 }
 
 function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
