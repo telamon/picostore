@@ -2,7 +2,7 @@ import debug from 'debug'
 import { toHex } from 'picofeed'
 import { encode, decode } from 'cborg'
 const D = debug('pico:gc')
-const REG_TIMER = 'GCt'
+const REG_TIMER = 'TIMR'
 
 export default class GarbageCollector { // What's left is the scheduler
   intervalId = null
@@ -15,7 +15,7 @@ export default class GarbageCollector { // What's left is the scheduler
   }
 
   /**
-   * setTimemout over LevelDB
+   * setTimeout over LevelDB
    * Schedules an event to be triggered on next sweep.
    * Used by 'mark()'-function to mark objects that should be removed.
    *
@@ -23,15 +23,23 @@ export default class GarbageCollector { // What's left is the scheduler
    * @param date {Number} When to run the check next time default to next run.
    */
   async schedule (root, blockRoot, id, date = Date.now()) {
-    const memo = encode({ root, blockRoot, id, date })
-    const key = mkKey(date)
-    D('schedule:', toHex(key), root, id, date)
-    await this.db.put(key, memo)
+    await this.setTimeout('gc', { root, blockRoot, id, date }, date, true)
+  }
+
+  /**
+   * @param {string} type Accepted strings 'gc|pp|gcmp'
+   * @param {any} memo Stored context that will be returned on trigger
+   * @param {number} millis Milliseconds
+   */
+  async setTimeout (type, memo = {}, millis = 0, isTimestamp = false) {
+    D('setTimeout', type, memo, millis)
+    const key = mkKey(isTimestamp ? millis : Date.now() + millis)
+    await this.db.put(key, encode({ type, memo }))
   }
 
   async tickQuery (now) {
     const query = {
-      gt: new Uint8Array(9), // All zeroes
+      gt: new Uint8Array(10), // All zeroes
       lt: mkKey(now, 0xff)
     }
     D('sweep range:', toHex(query.gt), '...', toHex(query.lt))
@@ -57,8 +65,13 @@ export default class GarbageCollector { // What's left is the scheduler
     D('Fetched pending from store:', pending.length)
     const evicted = []
     let mutated = new Set()
-    for (const memo of pending) {
+    for (const { type, memo } of pending) {
       const { root } = memo
+      if (type !== 'gc') {
+        console.info('Warn unhandled event', type, memo)
+        continue
+      }
+
       const collection = picoStore.roots[root]
       if (!collection) throw new Error(`Unknown Root ${root}`)
       const droppedFeed = await collection._gc_visit(now, memo)
@@ -82,16 +95,12 @@ let _ctr = 0
  */
 function mkKey (date, counter) {
   // Manually writeBigUInt64BE
-  const b = new Uint8Array(9)
+  const b = new Uint8Array(10)
   for (let i = 0; i < 8; i++) {
     b[i] = Number((BigInt(date) >> BigInt((7 - i) * 8)) & BigInt(255))
   }
-  if (counter ?? false) b[8] = counter
-  else {
-    // Automatic counter '_ctr' prevents task-overwrites
-    // when mkKey invoked within same millisecond.
-    _ctr = (1 + _ctr) % 256
-    b[8] = _ctr
-  }
+  if (!Number.isFinite(counter)) counter = _ctr = ++_ctr % 65536
+  b[8] = _ctr & 0xff
+  b[9] = (_ctr >> 8) & 0xff
   return b
 }
