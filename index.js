@@ -17,6 +17,7 @@ const SymSignal = Symbol.for('PiC0VM::signal')
 /** @typedef {u8|hexstring} Signature */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
 /** @typedef {import('picofeed').PublicKey} PublicKey */
+/** @typedef {Signature|PublicKey|number} ObjectId */
 /**
     @typedef {{ [SymReject]: true, message?: string, silent: boolean }} Rejection
     @typedef {{ [SymPostpone]: true, message?: string, time: number, retries: number }} Reschedule
@@ -32,9 +33,9 @@ const SymSignal = Symbol.for('PiC0VM::signal')
 
     // Root of the problem
     @typedef { DispatchContext & {
+      id: ObjectId,
       reject: (message) => Rejection,
       postpone: (timeMillis: number, errorMsg: string, nTries: 3) => Reschedule,
-      signal: (name: string, payload: any) => void,
       lookup: (key: u8|string) => Promise<BlockID>
     }} ComputeContext
 
@@ -79,11 +80,12 @@ export class Memory {
   get store () { return this.#store }
   get state () { return clone(this.#cache) }
 
-  /** @param {DispatchContext} ctx */
-  async idOf (ctx) { return this.store.repo.allowDetached ? ctx.CHAIN : ctx.AUTHOR }
+  /** @param {{ CHAIN: Signature, AUTHOR: PublicKey}} ctx
+    * @returns {Promise<ObjectId>} */
+  async idOf ({ CHAIN, AUTHOR }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
 
   /** @param {any} value The current state
-   *  @param {(root:string, id: ObjId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
+   *  @param {(root:string, id: ObjectId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
    *  @returns {Promise<number|Infinity>} */
   async expiresAt (value, latch) { return Infinity }
 
@@ -138,10 +140,12 @@ export class Memory {
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = await this.idOf(ctx) // ObjId
-    ctx.id = id // Safe to pollute I guess.
+    // ctx.id = id // Safe to pollute I guess. Maybe not necessary?
     const value = tripWire(await this.readState(id)) // TODO: Copy|ICE?
     // Phase0: Set up mutually exclusive rejection/postpone flow-control.
-    let abortMerge = false
+    /** @type {Rejection|Reschedule|undefined} */
+    let abortMerge
+
     const reject = message => {
       if (abortMerge) throw new Error(`Merge already rejected: ${abortMerge.message}`)
       abortMerge = { [SymReject]: true, message, silent: !message }
@@ -150,14 +154,18 @@ export class Memory {
     const postpone = (time, message, retries = 3) => {
       if (abortMerge) throw new Error(`Merge already rejected: ${abortMerge.message}`)
       abortMerge = { [SymPostpone]: true, message, time, retries }
+      return abortMerge
     }
+
     // Phase1: Compute State change
     const computeContext = /** @type {ComputeContext} */ {
       ...ctx,
+      id,
       reject,
       postpone,
       lookup: key => this.#lookup(key)
     }
+
     const draft = await this.compute(value, computeContext)
 
     if (abortMerge) return abortMerge
@@ -224,9 +232,10 @@ export class Memory {
 
   /**
    * @param {Sigint} signal an interrupt/signal
-   * @param {DispatchContext} context
+   * @param {DispatchContext} ctx Dispatch context
    */
   async _trap (signal, ctx) {
+    // @ts-ignore
     if (typeof this.trap !== 'function') return
     const { type, payload } = signal
     let didMutate = false
@@ -238,6 +247,7 @@ export class Memory {
       didMutate = true
     }
     // TODO: signals/interrupt cannot increase refcounts as we do not provide any anti-signals
+    // @ts-ignore
     await this.trap(type, payload, mutate)
     if (didMutate) await this._incrState(ctx.block.id) // TODO: IncrState once on unlock
   }
@@ -256,6 +266,10 @@ export class Memory {
     // TODO: move Date and Collection name to BlockHeaders
     branch.append(encode([this.name, payload, Date.now()]), secret)
     return await this.store.dispatch(branch, true)
+  }
+
+  sub (observer) {
+    throw new Error('TODO: Implement memory subscriptions')
   }
 }
 
@@ -278,7 +292,9 @@ export class CRDTMemory extends Memory {
     draft._created ||= draft._updated
     // console.info('CRDTMemory.compute() draft:', draft, 'data:', payload)
     const res = await this.validate(draft, { previous: value, ...computeContext })
-    if (res === true) return computeContext.reject()
+
+    // if (res === true) return computeContext.reject() // I don't like this, does anyone like this?
+
     // This should prevent validate from doing
     // anything else but validating.
     if (res && (res[SymPostpone] || res[SymReject])) return res
@@ -308,8 +324,14 @@ export class CRDTMemory extends Memory {
     return this.createBlock(branch, diff, secret)
   }
 
-  async validate (value) {
-    return false // accept all override for diff behaviour
+  /**
+   * @param {any} value
+   * @param {ComputeContext&{ previous: any }} context
+   * @return {Promise<Rejection?>}
+   */
+  async validate (value, context) {
+    // accept all override for diff behaviour
+    return
   }
 }
 
@@ -565,6 +587,7 @@ export default class Store {
     if (!Array.isArray(res)) { // If not Array<Signal> it's an error
       if (res[SymReject]) {
         // Loud should be set when locally produced blocks are dispatched.
+        // @ts-ignore
         if (loud || !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
       } else if (res[SymPostpone]) {
         console.error('TODO: Implement retries of postponed blocks')
@@ -671,6 +694,7 @@ function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
 // Weblocks shim
 const locks = (
   typeof window !== 'undefined' &&
+  // @ts-ignore
   window.navigator?.locks
 ) || {
   resources: {},

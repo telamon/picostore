@@ -64,7 +64,7 @@ export default class GarbageCollector { // What's left is the scheduler
     const pending = await this.tickQuery(now)
     D('Fetched pending from store:', pending.length)
     const evicted = []
-    let mutated = new Set()
+    const mutated = new Set()
     for (const { type, memo } of pending) {
       const { root } = memo
       if (type !== 'gc') {
@@ -80,9 +80,9 @@ export default class GarbageCollector { // What's left is the scheduler
         mutated.add(root)
       }
     }
-    mutated = Array.from(mutated)
-    D('Stores mutated', mutated, 'segments evicted', evicted.length)
-    return { mutated, evicted }
+    const arrMutated = Array.from(mutated)
+    D('Stores mutated', arrMutated, 'segments evicted', evicted.length)
+    return { mutated: arrMutated, evicted }
   }
 }
 

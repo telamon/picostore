@@ -75,7 +75,7 @@ export default class MemPool {
   }
 
   async _hasBlock (id) {
-    return !!(await this.readBlock(id))
+    return !!(await this._readBlock(id))
   }
 }
 
