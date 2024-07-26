@@ -3,7 +3,8 @@ import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 // import { init, get } from 'piconuro'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js' // TODO: rename to scheduler
-import { encode, decode } from 'cborg'
+import { encode, decode } from 'cborg' // @ts-ignore
+import { ice, thaw } from './ice.js'
 
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -11,12 +12,28 @@ import { encode, decode } from 'cborg'
 /** @typedef {Signature} Chain */
 /** @typedef {Author|Chain|Signature} RootID */
 /** @typedef {import('picofeed').SecretKey} SecretKey */
-/** @typedef {{
-  initialValue?: any,
-  id: () => hexstring|number,
-  validate: () => string?,
-  expiresAt: () => number
-}} CollectionSpec */
+/** @typedef {import('picofeed').Block} Block */
+
+
+/**
+  @typedef {{
+    id: RootID|number,
+    blockRoot: RootID,
+    payload: any,
+    date: number,
+    block: Block,
+    parentBlock: Block,
+    AUTHOR: Author,
+    CHAIN: Signature
+  }} ReducerContext
+
+  @typedef {{
+    initialValue?: any,
+    id: () => hexstring|number,
+    validate: (ValidationContext) => Promise<string?>,
+    expiresAt: () => number
+    reduce?: (state: any, payload: any, ctx: ReducerContext) => Promise<any>
+  }} CollectionSpec */
 
 /**
  * A reference-counting dstate manager
@@ -39,14 +56,17 @@ class Collection {
       expiresAt: () => -1, // non-perishable
       ...config
     }
+    if (config.reduce && typeof config.reduce !== 'function') throw Error('Expected reduce to be a function')
   }
+
+  get hasCustomReducer () { return !!this.config.reduce }
 
   /**
    * Mutates the decentralized state of this collection.
-   * @param {Chain|BlockId|Feed} branch
+   * @param {Chain|BlockId|Feed|undefined} branch TODO: replace with Chain or null == AUTHOR
    * @param {(value, MutationContext) => value} mutFn
    * @param {SecretKey} secret Signing secret
-   * @param {Feed} feed The branch to append to
+   * @return {Promise<Feed>} the new branch
    */
   async mutate (branch, mutFn, secret) {
     const AUTHOR = getPublicKey(secret)
@@ -59,10 +79,19 @@ class Collection {
     const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
     // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
     const stateRoot = this.config.id({ AUTHOR, CHAIN })
-    const oValue = await this.readState(stateRoot)
-    const nValue = mutFn(Object.freeze(oValue), {})
-    const diff = formatPatch(oValue, nValue)
-    branch.append(encode({ root: this.name, diff, date: Date.now() }), secret)
+
+    let payload = null // payload
+    if (!this.hasCustomReducer) {
+      const oValue = await this.readState(stateRoot)
+      if (typeof mutFn !== 'function') throw new Error('Expected parameter mutFn to be a function')
+      const nValue = await mutFn(ice(oValue), {})
+      payload = formatPatch(oValue, thaw(nValue))
+    } else {
+      payload = mutFn
+      if (typeof payload === 'function') throw new Error('Expected payload to be an object or primitive, got function')
+    }
+
+    branch.append(encode([this.name, Date.now(), payload]), secret)
     return await this.store.dispatch(branch, true)
   }
 
@@ -84,29 +113,42 @@ class Collection {
 
   /** @param {RootID} id */
   async readBranch (id) {
-    return this.store.repo._allowDetached
+    return this.store.repo.allowDetached
       ? this.store.repo.loadFeed(id)
-      : this.store.repo.loadHead(id)
+      : this.store.repo.loadHead(id) // TODO: deprecate loadHead?
   }
 
   async _validateAndMutate (ctx) {
     const {
-      data,
+      payload,
+      date,
       AUTHOR,
       CHAIN,
       block
     } = ctx
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = this.config.id({ blockRoot, ...ctx })
+    const ectx = { id, blockRoot, ...ctx }
+
     const value = await this.readState(id)
-    const mValue = applyPatch(value, data.diff)
-    const ectx = { id, blockRoot, previous: value, ...ctx }
-    const err = this.config.validate(mValue, ectx)
+    let mValue = null
+    if (!this.hasCustomReducer) {
+      mValue = applyPatch(value, payload)
+    } else {
+      // throw new Error('Not implemented')
+      mValue = thaw(await this.config.reduce(ice(value, true), payload, ectx))
+      if (typeof mValue === 'undefined') mValue = thaw(value)
+      if (typeof mValue === 'undefined' || mValue === null) throw new Error('No Changes Detected')
+    }
+
+    ectx.previous = value
+
+    const err = await this.config.validate(mValue, ectx)
     if (err) return err
     await this.writeState(id, mValue)
     ectx.value = mValue
     // Schedule GC & Ref
-    const expiresAt = this.config.expiresAt(data.date, ectx)
+    const expiresAt = this.config.expiresAt(date, ectx)
     await this.store._refIncrement(blockRoot, this.name, id)
     if (expiresAt !== -1) await this.store._gc.schedule(this.name, blockRoot, id, expiresAt)
     await this._incrState(block.id)
@@ -163,10 +205,12 @@ function mkRefKey (blockRoot, stateRoot, objId) {
 }
 
 export default class Store {
+  static encode = encode
+  static decode = decode
   roots = {} // StateRoots
   _loaded = false
   _tap = null // global signal trap
-  mutexTimeout = 5000
+  mutexTimeout = 10000
   _onUnlock = []
   stats = {
     blocksIn: 0,
@@ -191,6 +235,7 @@ export default class Store {
    * Initializes a collection decentralized state
    * @param {string} name The name of the collection
    * @param {CollectionSpec} config collection configuration
+   * @return {Collection}
    */
   spec (name, config) {
     if (config && this._loaded) throw new Error('Hotconf not supported')
@@ -345,11 +390,13 @@ export default class Store {
     /// Merge DSTATE-roots
     const merged = []
     for (const block of patch.blocks.slice(-diff)) {
-      const data = decode(block.body) // TODO: Support multi-root blocks?
-      const collection = this.roots[data.root]
-      if (!collection) throw new Error('UnknownCollection' + data.root)
+      const [root, date, payload] = decode(block.body) // TODO: Support multi-root blocks?
+      const collection = this.roots[root]
+      if (!collection) throw new Error('UnknownCollection: ' + root)
       const validationError = await collection._validateAndMutate({
-        data,
+        root,
+        payload,
+        date,
         block,
         parentBlock,
         ...tags
@@ -360,7 +407,7 @@ export default class Store {
       parentBlock = block
       const m = await this.repo.merge(block, this._strategy) // TODO: batch merge?
       if (!m && loud) console.warn('RejectedByBucket: MergeStrategy failed')
-      this._notify('merged', { block, root: data.root })
+      this._notify('merged', { block, root })
       merged.push(block)
     }
     return Feed.from(merged)
@@ -389,19 +436,21 @@ export default class Store {
         }
         let parentBlock = null
         for (const block of part.blocks) {
-          const data = decode(block.body) // TODO: Support multi-root blocks?
-          const collection = this.roots[data.root]
-          if (!collection) throw new Error('UnknownCollection' + data.root)
+          const [root, date, payload] = decode(block.body) // TODO: Support multi-root blocks?
+          const collection = this.roots[root]
+          if (!collection) throw new Error('UnknownCollection' + root)
           const validationError = await collection._validateAndMutate({
-            data,
+            root,
+            date,
+            payload,
             block,
             parentBlock,
             ...tags
           })
           if (validationError) throw new Error(`InvalidBlock during reload: ${validationError}`)
-          this._notify('reload', { block, root: data.root })
+          this._notify('reload', { block, root })
           parentBlock = block
-          modified.add(data.root)
+          modified.add(root)
         }
       }
       return Array.from(modified)

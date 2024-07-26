@@ -58,6 +58,45 @@ test('PicoStore 3.x', async t => {
   t.is(nRefs, 0, 'Refcount zero')
 })
 
+test('poh-compatible block indexer', async t => {
+  const { pk, sk } = Feed.signPair()
+  const db = DB()
+  const store = new Store(db)
+  // API Change
+  const collection = store.spec('players', {
+    initialValue: {
+      state: 'idle',
+      x: 0,
+      y: 15
+    },
+    id: ({ AUTHOR }) => AUTHOR, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
+    validate: (ctx) => { debugger; false }, // ErrorMSG|void
+    expiresAt: date => date + 10000,
+
+    async reduce (state, payload, ctx) {
+      debugger;
+      return state
+    }
+  })
+  await store.load()
+  let v = await collection.readState(pk)
+  const actions = [
+    ['move', 50, 50],
+    ['move', 25, 50],
+    ['say', 'Hello?? Can anyone hear me?'],
+    ['move', 45, 25],
+    ['say', 'Here we go'],
+    ['fight'],
+    ['rip']
+  ]
+  for (const op of actions) {
+    // manual mutation
+    const b = await collection.mutate(null, op, sk)
+  }
+  actions.inspect()
+  await store.dispatch(actions.block(0))
+})
+
 test('PicoStore 2.x scenario', async t => {
   const db = DB()
   const store = new Store(db)
