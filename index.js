@@ -716,7 +716,7 @@ export function formatPatch (a, b) {
     }
     default: // eslint-disable-line default-case-last
       console.warn('formatPatch: Unhandled type', type, a, b)
-    case 'string':
+    case 'string': // eslint-disable-line no-fallthrough
     case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
@@ -742,7 +742,7 @@ export function applyPatch (a, b) {
     }
     default: // eslint-disable-line default-case-last
       console.warn('applyPatch: Unhandled type', type, a, b)
-    case 'string':
+    case 'string': // eslint-disable-line no-fallthrough
     case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
@@ -780,4 +780,4 @@ export function tripWire (o, path = []) {
   })
 }
 
-export function clone(o) { return decode(encode(o)) }
+export function clone (o) { return decode(encode(o)) }

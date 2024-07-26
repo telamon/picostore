@@ -1,19 +1,17 @@
 [`pure | 📦`](https://github.com/telamon/create-pure)
 [`code style | standard`](https://standardjs.com/)
-# picostore
+# picostore (block-engine)
 
-> Magical redux-like state handler using picofeed blockchains
+This engine takes consensus rules in JavaScript.
+Then it consumes blocks, and maintains a local view
+of the decentralized state.
 
-`TODO: rewrite this section/ entire readme`
+It wouldn't be wrong to call it an indexer,
+but it would be half of it.
 
-PicoStore - picofeed powered blockchain state reducer (blockend-toolkit)
-Compatible with what ever frontend framework you wish to use.
+Because there's also a garbarge collector.
 
-The reduced state is always persisted and consistent across reloads and
-application restarts. (Automagically restores in-memory state from cold-storage)
-
-Works in browser and nodejs using leveldb and IndexedDB. (levelup)
-Use `MemoryLevel` in unit-tests.
+> __warn: instructions below are outdated__
 
 ## Use
 

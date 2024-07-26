@@ -7,9 +7,9 @@
   "scripts": {
     "lint": "standard",
     "test": "node test.js",
-    "types": "tsc --allowJs --checkJs --removeComments --declaration --emitDeclarationOnly --lib es2022,dom --target es2022 --outFile index.js --moduleResolution nodenext index.js",
     "debug": "node inspect test.js",
-    "prepublishOnly": "standard && npm test && npm run types"
+    "prepublishOnly": "standard && npm test",
+    "types": "tsc --noEmit --allowJs --checkJs --declaration --removeComments --lib es2022,dom --target es2022 --moduleResolution nodenext --module nodenext index.js"
   },
   "repository": {
     "type": "git",
@@ -22,18 +22,18 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
-    "brittle": "^3.3.2",
-    "c8": "^8.0.1",
-    "cborg": "^4.0.5",
+    "brittle": "^3.6.1",
+    "c8": "^10.1.2",
+    "cborg": "^4.2.3",
     "memory-level": "^1.0.0",
-    "picofeed": "^5.0.2",
+    "picofeed": "^8.0.0",
     "piconuro": "^1.0.1",
-    "picorepo": "^2.1.1",
+    "picorepo": "^2.2.0",
     "standard": "^17.1.0"
   },
   "peerDependencies": {
     "cborg": "^4.0.5",
-    "picofeed": "^5.0.1",
-    "picorepo": "^2.1.1"
+    "picofeed": "^8.0.0",
+    "picorepo": "^2.2.0"
   }
 }
