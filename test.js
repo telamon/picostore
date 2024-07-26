@@ -1,11 +1,12 @@
 import { test, skip, solo } from 'brittle'
-import { Feed, toU8 } from 'picofeed'
+import { Feed, toU8, cmp } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
 import { get } from 'piconuro'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
-import Store from './index.js'
+import Store, { CRDTMemory, Memory } from './index.js'
+import { isArray } from 'node:util'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -26,25 +27,24 @@ test('PicoStore 3.x', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
-  // API Change
-  const collection = store.spec('counter', {
-    initialValue: 0,
-    // malloc() => id/ptr
-    id: () => 0, // PK<Author>|ChainID<Task,Note>|BlockID<Chat,Battle>
-    validate: () => false, // ErrorMSG|void
-    expiresAt: date => date + 10000
+  // API Change twice
+  const collection = store.register('counter', class CRDTCounter extends CRDTMemory {
+    initialValue = { x: 0 }
+    idOf () { return 0 } // one global counter
+    validate () { return false } // Accept all,
+    expiresAt () { return 0 }
   })
   await store.load()
 
   let v = await collection.readState(0)
-  t.is(v, 0) // Singular states are the exception
+  t.is(v.x, 0) // Singular states are the exception
 
   // CRDt like patches
-  const blocks = await collection.mutate(null, () => 4, sk)
+  const blocks = await collection.mutate(null, () => ({ x: 4}), sk)
   t.ok(Feed.isFeed(blocks))
 
   v = await collection.readState(0)
-  t.is(v, 4)
+  t.is(v.x, 4)
 
   let nRefs = await store.referencesOf(pk) // Author is blockRoot
   t.is(nRefs, 1, 'Refcount by Author = 1')
@@ -54,13 +54,14 @@ test('PicoStore 3.x', async t => {
   t.ok(Array.isArray(expunged))
   t.ok(Feed.isFeed(expunged[0]))
   v = await collection.readState(0)
-  t.is(v, 0)
+  t.is(v.x, 0)
 
   nRefs = await store.referencesOf(pk)
   t.is(nRefs, 0, 'Refcount zero')
+  await store.reload()
 })
 
-solo('DVM3.x Conways Game Of Hugs', async t => {
+test('DVM3.x Conways Game Of Hugs', async t => {
   const db = DB()
   const store = new Store(db)
   const [profiles, hugs] = createGame(store)
@@ -68,7 +69,7 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
   const A = Feed.signPair()
   const B = Feed.signPair()
   const feedA = await profiles.mutate(null, p => ({ ...p, name: 'alice' }), A.sk)
-  const objId = A.pk // Bad example: We know that blockRoot === ObjectId
+  // const objId = A.pk // Bad example: We know that blockRoot === ObjectId
   // const sigHEAD = await profiles.blockRootOf(objId) // TODO: undefined
   const feed = await store.readBranch(A.pk)
   t.is(feed.diff(feedA), 0)
@@ -91,57 +92,58 @@ solo('DVM3.x Conways Game Of Hugs', async t => {
 })
 
 test('PicoStore 2.x scenario', async t => {
-  const db = DB()
-  const store = new Store(db)
-  const spec = {
-    id: () => 0,
-    initialValue: 5,
-    validate: (v, { previous }) => v < previous ? `Must Increment ${v} > ${previous}` : false
+  const store = new Store(DB())
+
+  class Counter extends Memory {
+    initialValue = 5
+    idOf () { return 0 }
+    compute (v, { payload, reject }) {
+      if (payload <= v) return reject(`Must Increment ${payload} > ${v}`)
+      return payload
+    }
   }
-  const colCounter = store.spec('counter', spec)
+
+  const colCounter = store.register('counter', Counter)
   await store.load()
 
   t.is(await colCounter.readState(0), 5)
   // Create mutation
   const { sk } = Feed.signPair()
-  let branch = await colCounter.mutate(null, v => {
-    t.is(v, 5, 'Previous value')
-    return 7
-  }, sk)
+
+  let branch = await colCounter.createBlock(null, 7, sk)
   t.is(await colCounter.readState(0), 7)
 
-  // Try to restore previously persisted state
-  const store2 = new Store(db)
-
-  const counter2 = store2.spec('counter', spec)
+  // Simulate network connection between two stores
+  const store2 = new Store(DB())
+  const counter2 = store2.register('counter', Counter)
   await store2.load()
+  t.is(await counter2.readState(0), 5)
+  await store2.dispatch(branch)
   t.is(await counter2.readState(0), 7)
 
   // Rejected changes do not affect state
-  await t.exception(async () =>
-    await counter2.mutate(branch, () => 2, sk)
-  )
-  branch.truncate(branch.length - 1) // Lop off the invalid block
-  t.is(await counter2.readState(0), 7)
+  await t.exception(counter2.createBlock(branch, 2, sk))
+  branch.truncate(-1) // Lop off the invalid block
+  t.is(await counter2.readState(0), 7, 'state not modified')
 
   // Test valid changes
-  branch = await counter2.mutate(branch, () => 10, sk)
-  branch = await counter2.mutate(branch, () => 12, sk)
+  branch = await counter2.createBlock(branch, 10, sk)
+  branch = await counter2.createBlock(branch, 12, sk)
 
   // let changed = await store.dispatch(branch)
   // t.equal(changed.length, 1)
-  t.is(await counter2.readState(0), 12)
+  t.is(await counter2.readState(0), 12, 'is 12')
 
   // Purge and rebuild state from scratch
-  await store.reload()
-  t.is(await colCounter.readState(0), 12)
+  await store2.reload()
+  t.is(await counter2.readState(0), 12)
 })
 
 test('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
-  const profiles1 = store.spec('pk', { initialValue: {} })
+  const profiles1 = store.register('pk', CRDTMemory)
   await store.load()
 
   await profiles1.mutate(null, (_) => ({
@@ -156,7 +158,7 @@ test('Buffers should not be lost during state reload', async t => {
 
   // Open second store forcing it to load cached state
   const s2 = new Store(db)
-  const profiles2 = s2.spec('pk', { initialValue: {} })
+  const profiles2 = s2.register('pk', CRDTMemory)
   await s2.load()
   o = await profiles2.readState(pk)
   t.ok(cmp(toU8(pk), o.nested.buf))
@@ -164,21 +166,28 @@ test('Buffers should not be lost during state reload', async t => {
   t.ok(cmp(toU8(pk), o.prop))
 })
 
-test('Throw validation errors on dispatch(feed, loudFail = true)', async t => {
+test('Validation errors cause createBlock() to fail', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
-  // returning "true" from a validator now is a forced silent ignore
-  const x = store.spec('x', { initialValue: 0, validate: () => 'do not want' })
-  const y = store.spec('y', { initialValue: 0, validate: () => true })
+  class DummyCounter extends CRDTMemory {
+    initialValue = { n: 0 }
+    idOf () { return 0 }
+  }
+  const x = store.register('x', class X extends DummyCounter { validate (_, { reject }) { return reject('do not want') } })
+  const y = store.register('y', class Y extends DummyCounter { validate (_, { reject }) { return reject() } }) // usually silent ignore
   await store.load()
-  // validate: 'errstring' = lout fail
-  await t.exception(async () =>
-    await x.mutate(null, () => 1, sk)
+
+  await t.exception(
+    x.mutate(null, () => ({ n: 1 }), sk),
+    'Validation error became mutation error'
   )
-  // validate: true = silent fail
-  const m = await y.mutate(null, () => 1, sk)
-  t.is(typeof m, 'undefined')
+
+  await t.exception(
+    y.mutate(null, () => ({ n: 1 }), sk),
+    'Silent validation error became mutation error'
+  )
+  t.is((await y.readState(0)).n, 0, 'state not mutated')
 })
 
 skip('Parent block provided to validator', async t => {

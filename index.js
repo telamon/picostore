@@ -4,9 +4,11 @@ import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 import Cache from './cache.js'
 import GarbageCollector from './gc.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
+
 const SymPostpone = Symbol.for('PiC0VM::postpone')
 const SymReject = Symbol.for('PiC0VM::reject')
 const SymSignal = Symbol.for('PiC0VM::signal')
+
 /** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -23,7 +25,9 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       parentBlock: Block,
       AUTHOR: hexstring,
       CHAIN: hexstring,
-      data: any
+      root: string,
+      payload: any,
+      date: number
     }} DispatchContext
 
     // Root of the problem
@@ -65,27 +69,36 @@ export class Memory {
     ]) { if (typeof this.compute !== 'function') throw new Error(`${this.constructor.name} must implement async ${method}`) }
   }
 
+  _reset () {
+    this.#cache = {}
+    this.#version = 0
+    this.#head = undefined
+  }
+
   /** @returns {Store} */
   get store () { return this.#store }
-  get state () { return decode(encode(this.#cache)) } // clone
+  get state () { return clone(this.#cache) }
 
   /** @param {DispatchContext} ctx */
   async idOf (ctx) { return this.store.repo.allowDetached ? ctx.CHAIN : ctx.AUTHOR }
+
   /** @param {any} value The current state
    *  @param {(root:string, id: ObjId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
    *  @returns {Promise<number|Infinity>} */
   async expiresAt (value, latch) { return Infinity }
+
   /** @param {any} value Current state
     * @param {ComputeContext} ctx
     * @returns {Promise<Rejection|Reschedule|any>} The new value */
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
+
   async postapply (value, ctx) { }
 
   async readState (id) {
     if (id instanceof Uint8Array) id = toHex(id)
     return id in this.#cache
       ? this.#cache[id]
-      : this.initialValue
+      : clone(this.initialValue)
   }
 
   async hasState (id) {
@@ -126,7 +139,7 @@ export class Memory {
     const blockRoot = this.store.repo.allowDetached ? CHAIN : AUTHOR
     const id = await this.idOf(ctx) // ObjId
     ctx.id = id // Safe to pollute I guess.
-    const value = tripWire(await this.readState(id)) // TODO: Copy?
+    const value = tripWire(await this.readState(id)) // TODO: Copy|ICE?
     // Phase0: Set up mutually exclusive rejection/postpone flow-control.
     let abortMerge = false
     const reject = message => {
@@ -161,11 +174,12 @@ export class Memory {
 
     // Phase3: Schedule deinitialization & increment reference counts
     const latch = this.store._latchExpireAt.bind(this.store, 0)
-    const exp = await this.expiresAt(draft, latch)
+    const exp = await this.expiresAt(draft, latch) // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
     if (exp !== Infinity) await this.store._gc.schedule(this.name, blockRoot, id, exp)
     await this.store._refIncrement(blockRoot, this.name, id)
     await this._incrState(block.id) // TODO: IncrState once on unlock
+    // Complete
     return signals
   }
 
@@ -175,7 +189,7 @@ export class Memory {
     if (!(await this.hasState(id))) return // console.info('_gc_visit', this.name, toHex(toU8(id)), 'already swept')
     const value = await this.readState(id)
     const latch = this.store._latchExpireAt.bind(this.store, 0)
-    const exp = await this.expiresAt(value, latch)
+    const exp = await this.expiresAt(value, latch)  // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
     // console.info('_gc_visit', this.name, exp - gcDate, value)
     if (exp <= gcDate) {
@@ -227,19 +241,44 @@ export class Memory {
     await this.trap(type, payload, mutate)
     if (didMutate) await this._incrState(ctx.block.id) // TODO: IncrState once on unlock
   }
+
+  /**
+   * Creates a new block that targets this collection.
+   * Use this function in your actions to apply changes
+   * to local state.
+   *
+   * @param {BlockID|Feed} branch // TODO formalize actual input
+   * @param {any} payload Your state-changes/instructions
+   * @param {SecretKey} secret Signing secret
+   */
+  async createBlock (branch, payload, secret) {
+    branch = await this.store.readBranch(branch)
+    // TODO: move Date and Collection name to BlockHeaders
+    branch.append(encode([this.name, payload, Date.now()]), secret)
+    return await this.store.dispatch(branch, true)
+  }
 }
 
 /**
  * This memory model comes with a built-in
  * block creation function: 'mutate()'
  * making it easy to sync changes across peers
+ * The initialValue must be an Object because
+ * because this memory automatically maintains `_created` and `_updated`,
+ * which must be treated as read-only
  */
 export class CRDTMemory extends Memory {
+  initialValue = {}
+
+  /** @override */
   async compute (value, computeContext) {
-    const { data } = computeContext
-    const draft = applyPatch(value, data.diff)
-    draft.date = data.date
+    const { payload, date } = computeContext
+    const draft = applyPatch(value, payload)
+    draft._updated = date
+    draft._created ||= draft._updated
+    // console.info('CRDTMemory.compute() draft:', draft, 'data:', payload)
     const res = await this.validate(draft, { previous: value, ...computeContext })
+    if (res === true) return computeContext.reject()
     // This should prevent validate from doing
     // anything else but validating.
     if (res && (res[SymPostpone] || res[SymReject])) return res
@@ -249,7 +288,7 @@ export class CRDTMemory extends Memory {
   /**
    * Mutates the decentralized state of this collection.
    * @param {BlockID|Feed} branch
-   * @param {(value, MutationContext) => value} mutFn
+   * @param {(value, MutationContext) => Promise<value>} mutFn
    * @param {SecretKey} secret Signing secret
    */
   async mutate (branch, mutFn, secret) {
@@ -257,13 +296,20 @@ export class CRDTMemory extends Memory {
     branch = await this.store.readBranch(branch)
     // TODO: get chain id from repo incase partial feed was passed
     const CHAIN = branch.first?.genesis ? toHex(branch.first.id) : undefined
+
     // TODO: stateId/reduce/sweep should be interchangeable. (support different mem/transition models)
     const stateRoot = await this.idOf({ AUTHOR, CHAIN })
     const oValue = await this.readState(stateRoot)
-    const nValue = mutFn(Object.freeze(oValue), {})
-    const diff = formatPatch(oValue, nValue)
-    branch.append(encode({ root: this.name, diff, date: Date.now() }), secret)
-    return await this.store.dispatch(branch, true)
+
+    // TODO: MutationContext as second param to mutFn
+    const nValue = await mutFn(Object.freeze(oValue))
+    if (typeof nValue === 'undefined') throw new Error('Expected mutate to return new state, received undefined!')
+    const diff = formatPatch(oValue, nValue) // TODO: rename to payload
+    return this.createBlock(branch, diff, secret)
+  }
+
+  async validate (value) {
+    return false // accept all override for diff behaviour
   }
 }
 
@@ -284,6 +330,7 @@ function mkRefKey (blockRoot, stateRoot, objId = null) {
 }
 
 export default class Store {
+  /** @type {Record<string,Memory>} */
   roots = {} // StateRoots
   _loaded = false
   _tap = null // global signal trap
@@ -323,7 +370,7 @@ export default class Store {
   }
 
   _notify (event, payload) {
-    console.info('event:', event, payload.root)
+    // console.info('event:', event, payload.root)
   }
 
   async _refIncrement (blockRoot, stateRoot, objId) {
@@ -357,7 +404,7 @@ export default class Store {
   /** Debug utility; dumps reference registry to console */
   async _dumpReferences (log = console.info) {
     const iter = this._refReg.iterator()
-    for await (const [key, value] of iter)  {
+    for await (const [key, value] of iter) {
       log(toHex(key.subarray(0, 32)), '=>', decode(value))
     }
   }
@@ -489,11 +536,14 @@ export default class Store {
     // Merge DSTATE-roots
     const merged = []
     for (const block of patch.blocks.slice(-diff)) {
-      const data = decode(block.body) // TODO: Support multi-root blocks?
-      const collection = this.roots[data.root]
-      if (!collection) throw new Error('UnknownCollection' + data.root)
-      /** @type{DispatchContext} */
-      const dispatchContext = { data, block, parentBlock, ...tags }
+      const data = decode(block.body) // TODO: [collection, payload, date] // date is last because it's gonna be moved to BLOCK:POP8-header
+      if (!Array.isArray(data)) { console.error('Block.body:', data); throw new Error('UnrecognizedBlockFormat') }
+      const [root, payload, date] = data
+      const collection = this.roots[root]
+
+      if (!collection) throw new Error('UnknownCollection: ' + root)
+      /** @type {DispatchContext} */
+      const dispatchContext = { root, payload, date, block, parentBlock, ...tags }
       const success = await this._processBlock(collection, dispatchContext, loud)
       if (!success) break // Abort merge on first failed block
       parentBlock = block
@@ -508,13 +558,14 @@ export default class Store {
    * @param {DispatchContext} dispatchContext
    * @return {Promise<boolean>}
    */
-  async _processBlock (collection, dispatchContext, loud = false) {
-    const { block, data } = dispatchContext
+  async _processBlock (collection, dispatchContext, loud = false, skipMerge = false) {
+    const { block, root } = dispatchContext
     const res = await collection._validateAndMutate(dispatchContext)
+    // console.log('_processBlock() res', res)
     if (!Array.isArray(res)) { // If not Array<Signal> it's an error
       if (res[SymReject]) {
         // Loud should be set when locally produced blocks are dispatched.
-        if (loud && !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
+        if (loud || !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
       } else if (res[SymPostpone]) {
         console.error('TODO: Implement retries of postponed blocks')
         // TODO: schedule block-id with gc/scheduler to reattempt
@@ -523,13 +574,17 @@ export default class Store {
       }
       return false
     }
-    const nMerged = await this.repo.merge(block, this._strategy) // TODO: batch merge?
-    // nMerged is 0 when repo rejects a block, at this stage it must not be rejected.
-    if (!nMerged) throw new Error('[CRITICAL] MergeStrategy failed! state and blockstore is desynced. Fix bug and store.reload()')
-    this._notify('merged', { block, root: data.root })
+
+    if (!skipMerge) {
+      const nMerged = await this.repo.merge(block, this._strategy) // TODO: batch merge?
+      // nMerged is 0 when repo rejects a block, at this stage it must not be rejected.
+      if (!nMerged) throw new Error('[CRITICAL] MergeStrategy failed! state and blockstore is desynced. Fix bug and store.reload()')
+      this._notify('merged', { block, root })
+    }
 
     // Last phase run signals
     for (const sig of res) {
+      // Signals are broadcast across all collections
       for (const name in this.roots) this.roots[name]._trap(sig, dispatchContext)
     }
     return true
@@ -541,28 +596,27 @@ export default class Store {
   async reload () {
     return this._lockRun(async () => {
       const feeds = await this.repo.listFeeds()
-      for (const root in this.roots) {
-        const collection = this.roots[root]
-        collection.state = {}
-        collection.version = 0
-        collection.head = undefined
-      }
+      // Reset all states
+      for (const root in this.roots) this.roots[root]._reset()
       const modified = new Set()
       for (const { key: ptr, value: CHAIN } of feeds) {
-        const part = await this.repo.loadFeed(ptr)
-        const tags = { AUTHOR: part.first.key, CHAIN }
+        const feed = await this.repo.loadFeed(ptr)
+        const tags = { AUTHOR: feed.first.key, CHAIN }
         let parentBlock = null
-        for (const block of part.blocks) {
-          const data = decode(block.body) // TODO: Support multi-root blocks?
-          const collection = this.roots[data.root]
+
+        for (const block of feed.blocks) {
+          const [root, payload, date] = decode(block.body)
+          const collection = this.roots[root]
+          console.info('Replaying: ', root, payload, date)
           /** @type{DispatchContext} */
-          const dispatchContext = { data, block, parentBlock, ...tags }
-          const success = await this._processBlock(collection, dispatchContext, true) // Force loud
+          const dispatchContext = { root, payload, date, block, parentBlock, ...tags }
+          const success = await this._processBlock(collection, dispatchContext, true, true) // Force loud & skip repo-remerge
           if (!success) throw new Error('InvalidBlock during reload')
           parentBlock = block
-          this._notify('reload', { block, root: data.root })
-          modified.add(data.root)
+          this._notify('reload', { block, root })
+          modified.add(root)
         }
+
       }
       return Array.from(modified) // old api
     })
@@ -606,7 +660,7 @@ export default class Store {
     if (!(await root.hasState(id))) return 0 // Object is gone
     const value = await root.readState(id)
     const latch = this._latchExpireAt.bind(this, ++depth)
-    const exp = await root.expiresAt(value, latch)
+    const exp = await root.expiresAt(value, latch)  // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${rootName}.expiresAt() to return number|Infinity, got ${exp}`)
     return exp
   }
@@ -645,7 +699,7 @@ function unpromise () {
  */
 export function formatPatch (a, b) {
   if (typeof a === 'undefined') return b
-  if (typeOf(a) !== typeOf(b)) throw new Error('Dynamic typeswitching not supported')
+  if (typeOf(a) !== typeOf(b)) throw new Error(`Dynamic typeswitching not supported, ${typeOf(a)} ~> ${typeOf(b)}`)
   const type = typeOf(a)
   switch (type) {
     case 'number': return b - a
@@ -662,6 +716,7 @@ export function formatPatch (a, b) {
     }
     default: // eslint-disable-line default-case-last
       console.warn('formatPatch: Unhandled type', type, a, b)
+    case 'string':
     case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
@@ -687,6 +742,7 @@ export function applyPatch (a, b) {
     }
     default: // eslint-disable-line default-case-last
       console.warn('applyPatch: Unhandled type', type, a, b)
+    case 'string':
     case 'u8': // eslint-disable-line no-fallthrough
       return b
   }
@@ -707,6 +763,7 @@ export function ccat (...buffers) { // TODO: Move to Picofeed ?
   return out
 }
 
+// Merge with ice.js
 export function tripWire (o, path = []) {
   if (!o || typeof o !== 'object') return o
   return new Proxy(o, {
@@ -722,3 +779,5 @@ export function tripWire (o, path = []) {
     }
   })
 }
+
+export function clone(o) { return decode(encode(o)) }
