@@ -2,11 +2,10 @@ import { test, skip, solo } from 'brittle'
 import { Feed, toU8, cmp } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
-import { get } from 'piconuro'
+// import { get } from 'piconuro'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
-import Store, { CRDTMemory, Memory } from './index.js'
-import { isArray } from 'node:util'
+import Store, { DiffMemory, Memory } from './index.js'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -28,7 +27,7 @@ test('PicoStore 3.x', async t => {
   const db = DB()
   const store = new Store(db)
   // API Change twice
-  const collection = store.register('counter', class CRDTCounter extends CRDTMemory {
+  const collection = store.register('counter', class CRDTCounter extends DiffMemory {
     initialValue = { x: 0 }
     idOf () { return 0 } // one global counter
     validate () { return false } // Accept all,
@@ -40,7 +39,7 @@ test('PicoStore 3.x', async t => {
   t.is(v.x, 0) // Singular states are the exception
 
   // CRDt like patches
-  const blocks = await collection.mutate(null, () => ({ x: 4}), sk)
+  const blocks = await collection.mutate(null, () => ({ x: 4 }), sk)
   t.ok(Feed.isFeed(blocks))
 
   v = await collection.readState(0)
@@ -61,10 +60,10 @@ test('PicoStore 3.x', async t => {
   await store.reload()
 })
 
-test('DVM3.x Conways Game Of Hugs', async t => {
+test('DVM3.x Conways Game Of Bumps', async t => {
   const db = DB()
   const store = new Store(db)
-  const [profiles, hugs] = createGame(store)
+  const [profiles, bumps] = createGame(store)
   await store.load()
   const A = Feed.signPair()
   const B = Feed.signPair()
@@ -76,11 +75,11 @@ test('DVM3.x Conways Game Of Hugs', async t => {
   // t.ok(cmp(sigHEAD, feed.last.id))
 
   await profiles.mutate(null, p => ({ ...p, name: 'bob' }), B.sk)
-  const f2 = await hugs.createHug(B.pk, A.sk)
-  await hugs.respondHug(f2.last.id, B.sk)
+  const f2 = await bumps.createBump(B.pk, A.sk)
+  await bumps.respondBump(f2.last.id, B.sk)
 
-  const hugAB = Object.values(hugs.state)[0]
-  t.is(hugAB.status, 'accepted')
+  const bumpAB = Object.values(bumps.state)[0]
+  t.is(bumpAB.status, 'accepted')
   for (const profile of Object.values(profiles.state)) {
     t.is(profile.hp, 4.5, `${profile.name} hp increased`)
   }
@@ -88,7 +87,7 @@ test('DVM3.x Conways Game Of Hugs', async t => {
   // This is tiring but now the most important part, run GC witness deinitalization
   await store.gc(Date.now() + 9000000)
   t.is(Object.values(profiles.state).length, 0, 'Profiles Cleared')
-  t.is(Object.values(hugs.state).length, 0, 'Hugs Cleared')
+  t.is(Object.values(bumps.state).length, 0, 'Bumps Cleared')
 })
 
 skip('poh-compatible block indexer', async t => {
@@ -182,7 +181,7 @@ test('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
-  const profiles1 = store.register('pk', CRDTMemory)
+  const profiles1 = store.register('pk', DiffMemory)
   await store.load()
 
   await profiles1.mutate(null, (_) => ({
@@ -197,7 +196,7 @@ test('Buffers should not be lost during state reload', async t => {
 
   // Open second store forcing it to load cached state
   const s2 = new Store(db)
-  const profiles2 = s2.register('pk', CRDTMemory)
+  const profiles2 = s2.register('pk', DiffMemory)
   await s2.load()
   o = await profiles2.readState(pk)
   t.ok(cmp(toU8(pk), o.nested.buf))
@@ -209,7 +208,7 @@ test('Validation errors cause createBlock() to fail', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
-  class DummyCounter extends CRDTMemory {
+  class DummyCounter extends DiffMemory {
     initialValue = { n: 0 }
     idOf () { return 0 }
   }
@@ -229,8 +228,43 @@ test('Validation errors cause createBlock() to fail', async t => {
   t.is((await y.readState(0)).n, 0, 'state not mutated')
 })
 
+// Important test
+solo('Same block not reduced twice', async t => {
+  const { pk, sk } = Feed.signPair()
+  const store = new Store(DB())
+
+  const mmu = store.register('x', class extends Memory {
+    initialValue = 0
+    async idOf () { return 0 }
+    async compute (state, { id, payload, reject }) {
+      const n = payload
+      const isHigher = state < n
+      if (!isHigher) return reject(`Expected '${state}' < '${n}'`)
+      t.ok(isHigher, `unseen block ${n}`)
+      return n
+    }
+  })
+  await store.load()
+  let f = new Feed()
+  f = await mmu._formatBlock(f, 1, sk)
+  f = await mmu._formatBlock(f, 2, sk)
+  f = await mmu._formatBlock(f, 3, sk)
+  await store.dispatch(f)
+  f = await mmu._formatBlock(f, 4, sk)
+  f = await mmu._formatBlock(f, 5, sk)
+  await store.dispatch(f)
+  await store.dispatch(f)
+  const stored = await store.repo.loadHead(pk)
+  const x = await mmu.readState(0)
+  t.is(x, 5, 'Store state is correct')
+  t.is(f.length, stored.length, 'All blocks persisted')
+})
+
+// TODO Rewrite this test to validate DispatchContext, ComputeContext, PostapplyContext
+// Dispatch < Compute < Postapply
 skip('Parent block provided to validator', async t => {
   t.plan(35)
+
   const { sk } = Feed.signPair()
   const db = DB()
   const store = new Store(db)
@@ -269,6 +303,7 @@ skip('Parent block provided to validator', async t => {
   await store.reload()
 })
 
+// @deprecated, slices are async now, so root state dosen't have to be available +readonly anyway
 skip('Root state available in slices', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
@@ -293,34 +328,6 @@ skip('Root state available in slices', async t => {
   f.append('0', sk)
   await store.dispatch(f, true)
   t.end()
-})
-
-// Important test
-skip('Same block not reduced twice', async t => {
-  const { pk, sk } = Feed.signPair()
-
-  const db = DB()
-  const store = new PicoStore(db)
-  store.register('x', 0, () => false, ({ block, state }) => {
-    const n = parseInt(block.body.toString())
-    t.ok(state < n, 'unseen block')
-    return n
-  }) // dummy store
-
-  await store.load()
-  const f = new Feed()
-  f.append('1', sk)
-  f.append('2', sk)
-  f.append('3', sk)
-  await store.dispatch(f)
-  f.append('4', sk)
-  f.append('5', sk)
-  await store.dispatch(f)
-  await store.dispatch(f)
-
-  const stored = await store.repo.loadHead(pk)
-  t.equal(store.state.x, 5, 'Store state is correct')
-  t.equal(f.length, stored.length, 'All blocks persisted')
 })
 
 skip('Same block not reduced twice, given multiple identities', async t => {

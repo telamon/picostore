@@ -76,22 +76,22 @@ export class Memory {
     this.#head = undefined
   }
 
-  /** @returns {Store} */
+  /** @return {Store} */
   get store () { return this.#store }
   get state () { return clone(this.#cache) }
 
   /** @param {{ CHAIN: Signature, AUTHOR: PublicKey}} ctx
-    * @returns {Promise<ObjectId>} */
+    * @return {Promise<ObjectId>} */
   async idOf ({ CHAIN, AUTHOR }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
 
   /** @param {any} value The current state
    *  @param {(root:string, id: ObjectId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
-   *  @returns {Promise<number|Infinity>} */
+   *  @return {Promise<number|Infinity>} */
   async expiresAt (value, latch) { return Infinity }
 
   /** @param {any} value Current state
     * @param {ComputeContext} ctx
-    * @returns {Promise<Rejection|Reschedule|any>} The new value */
+    * @return {Promise<Rejection|Reschedule|any>} The new value */
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
 
   async postapply (value, ctx) { }
@@ -134,7 +134,7 @@ export class Memory {
   }
 
   /** @param {DispatchContext} ctx Context containing identified chain tags
-    * @returns {Promise<Rejection|Reschedule|Array<Sigint>>} Store alteration result */
+    * @return {Promise<Rejection|Reschedule|Array<Sigint>>} Store alteration result */
   async _validateAndMutate (ctx) {
     const { block, AUTHOR, CHAIN } = ctx
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
@@ -197,7 +197,7 @@ export class Memory {
     if (!(await this.hasState(id))) return // console.info('_gc_visit', this.name, toHex(toU8(id)), 'already swept')
     const value = await this.readState(id)
     const latch = this.store._latchExpireAt.bind(this.store, 0)
-    const exp = await this.expiresAt(value, latch)  // latchpatch
+    const exp = await this.expiresAt(value, latch) // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${this.name}.expiresAt() to return number|Infinity, got ${exp}`)
     // console.info('_gc_visit', this.name, exp - gcDate, value)
     if (exp <= gcDate) {
@@ -260,12 +260,21 @@ export class Memory {
    * @param {BlockID|Feed} branch // TODO formalize actual input
    * @param {any} payload Your state-changes/instructions
    * @param {SecretKey} secret Signing secret
+   * @return {Feed} Feed containing merged blocks
    */
   async createBlock (branch, payload, secret) {
+    branch = await this._formatBlock(branch, payload, secret)
+    return await this.store.dispatch(branch, true)
+  }
+
+  /**
+   * Same as createBlock except doesn't dispatch,
+   * used for test-simulations, use createBlock in production. */
+  async _formatBlock (branch, payload, secret) {
     branch = await this.store.readBranch(branch)
     // TODO: move Date and Collection name to BlockHeaders
     branch.append(encode([this.name, payload, Date.now()]), secret)
-    return await this.store.dispatch(branch, true)
+    return branch
   }
 
   sub (observer) {
@@ -281,7 +290,7 @@ export class Memory {
  * because this memory automatically maintains `_created` and `_updated`,
  * which must be treated as read-only
  */
-export class CRDTMemory extends Memory {
+export class DiffMemory extends Memory {
   initialValue = {}
 
   /** @override */
@@ -327,11 +336,11 @@ export class CRDTMemory extends Memory {
   /**
    * @param {any} value
    * @param {ComputeContext&{ previous: any }} context
-   * @return {Promise<Rejection?>}
+   * @return {Promise<Rejection|boolean>}
    */
   async validate (value, context) {
     // accept all override for diff behaviour
-    return
+    return false
   }
 }
 
@@ -381,7 +390,7 @@ export default class Store {
    * Initializes a managed decentralized memory area
    * @param {string} name - The name of the collection
    * @param {() => Memory} MemoryClass - Constructor of Memory or subclass
-   * @returns {Memory} - An instance of the MemorySubClass
+   * @return {Memory} - An instance of the MemorySubClass
    */
   register (name, MemoryClass) {
     if (this._loaded) throw new Error('Hotconf not supported')
@@ -433,7 +442,7 @@ export default class Store {
 
   /** Fetches a writable feed
    *  @param {undefined|BlockID|PublicKey} branch
-    * @returns {Promise<Feed>} */
+    * @return {Promise<Feed>} */
   async readBranch (branch) {
     if (!branch) return new Feed()
     if (Feed.isFeed(branch)) return branch
@@ -485,13 +494,13 @@ export default class Store {
   /**
    * Mutates the state, if a reload is in progress the dispatch will wait
    * for it to complete.
-   * @returns {Promise<Feed|undefined>} merged blocks
+   * @return {Promise<Feed|undefined>} merged blocks
    */
   async dispatch (patch, loud) {
     return this._lockRun(() => this._dispatch(patch, loud))
   }
 
-  /** @returns {Promise<Feed|undefined>} merged blocks */
+  /** @return {Promise<Feed|undefined>} merged blocks */
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     // align + grow blockroots
@@ -639,7 +648,6 @@ export default class Store {
           this._notify('reload', { block, root })
           modified.add(root)
         }
-
       }
       return Array.from(modified) // old api
     })
@@ -683,7 +691,7 @@ export default class Store {
     if (!(await root.hasState(id))) return 0 // Object is gone
     const value = await root.readState(id)
     const latch = this._latchExpireAt.bind(this, ++depth)
-    const exp = await root.expiresAt(value, latch)  // latchpatch
+    const exp = await root.expiresAt(value, latch) // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${rootName}.expiresAt() to return number|Infinity, got ${exp}`)
     return exp
   }
@@ -709,7 +717,7 @@ const locks = (
   }
 }
 
-/** @returns {[Promise, (v: any) => void, (e: Error) => void]} */
+/** @return {[Promise, (v: any) => void, (e: Error) => void]} */
 function unpromise () {
   let solve, eject
   const p = new Promise((resolve, reject) => { solve = resolve; eject = reject })
@@ -746,7 +754,7 @@ export function formatPatch (a, b) {
   }
 }
 /**
- * @returns {Object} a new instance with the patch applied */
+ * @return {Object} a new instance with the patch applied */
 export function applyPatch (a, b) {
   const type = typeOf(b)
   switch (type) {
