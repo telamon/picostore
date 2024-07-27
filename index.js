@@ -360,7 +360,7 @@ function mkRefKey (blockRoot, stateRoot, objId = null) {
   return k
 }
 
-export default class Store {
+export class Engine {
   /** @type {Record<string,Memory>} */
   roots = {} // StateRoots
   _loaded = false

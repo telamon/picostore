@@ -5,7 +5,7 @@ import { createGame } from './example_cgoh.js'
 // import { get } from 'piconuro'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
-import Store, { DiffMemory, Memory } from './index.js'
+import { Engine, DiffMemory, Memory } from './index.js'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -25,7 +25,7 @@ const DB = () => new MemoryLevel({
 test('PicoStore 3.x', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new Store(db)
+  const store = new Engine(db)
   // API Change twice
   const collection = store.register('counter', class CRDTCounter extends DiffMemory {
     initialValue = { x: 0 }
@@ -62,7 +62,7 @@ test('PicoStore 3.x', async t => {
 
 test('DVM3.x Conways Game Of Bumps', async t => {
   const db = DB()
-  const store = new Store(db)
+  const store = new Engine(db)
   const [profiles, bumps] = createGame(store)
   await store.load()
   const A = Feed.signPair()
@@ -93,7 +93,7 @@ test('DVM3.x Conways Game Of Bumps', async t => {
 skip('poh-compatible block indexer', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new Store(db)
+  const store = new Engine(db)
   // API Change
   const collection = store.spec('players', {
     initialValue: {
@@ -130,7 +130,7 @@ skip('poh-compatible block indexer', async t => {
 })
 
 test('PicoStore 2.x scenario', async t => {
-  const store = new Store(DB())
+  const store = new Engine(DB())
 
   class Counter extends Memory {
     initialValue = 5
@@ -152,7 +152,7 @@ test('PicoStore 2.x scenario', async t => {
   t.is(await colCounter.readState(0), 7)
 
   // Simulate network connection between two stores
-  const store2 = new Store(DB())
+  const store2 = new Engine(DB())
   const counter2 = store2.register('counter', Counter)
   await store2.load()
   t.is(await counter2.readState(0), 5)
@@ -180,7 +180,7 @@ test('PicoStore 2.x scenario', async t => {
 test('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new Store(db)
+  const store = new Engine(db)
   const profiles1 = store.register('pk', DiffMemory)
   await store.load()
 
@@ -195,7 +195,7 @@ test('Buffers should not be lost during state reload', async t => {
   t.ok(cmp(toU8(pk), o.prop))
 
   // Open second store forcing it to load cached state
-  const s2 = new Store(db)
+  const s2 = new Engine(db)
   const profiles2 = s2.register('pk', DiffMemory)
   await s2.load()
   o = await profiles2.readState(pk)
@@ -207,7 +207,7 @@ test('Buffers should not be lost during state reload', async t => {
 test('Validation errors cause createBlock() to fail', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
-  const store = new Store(db)
+  const store = new Engine(db)
   class DummyCounter extends DiffMemory {
     initialValue = { n: 0 }
     idOf () { return 0 }
@@ -228,301 +228,145 @@ test('Validation errors cause createBlock() to fail', async t => {
   t.is((await y.readState(0)).n, 0, 'state not mutated')
 })
 
-// Important test
-solo('Same block not reduced twice', async t => {
-  const { pk, sk } = Feed.signPair()
-  const store = new Store(DB())
+const makePlainCounter = t => class extends Memory {
+  initialValue = 0
+  async idOf () { return 0 }
+  async compute (state, { payload, reject }) {
+    const isHigher = state < payload
+    if (!isHigher) return reject(`Expected '${state}' < '${payload}'`)
+    t.ok(isHigher, `unseen block ${payload}`)
+    return payload
+  }
+}
 
-  const mmu = store.register('x', class extends Memory {
-    initialValue = 0
-    async idOf () { return 0 }
-    async compute (state, { id, payload, reject }) {
-      const n = payload
-      const isHigher = state < n
-      if (!isHigher) return reject(`Expected '${state}' < '${n}'`)
-      t.ok(isHigher, `unseen block ${n}`)
-      return n
-    }
-  })
+// Important test
+test('Same block not reduced twice', async t => {
+  const { pk, sk } = Feed.signPair()
+  const store = new Engine(DB())
+
+  const unit = store.register('x', makePlainCounter(t))
   await store.load()
   let f = new Feed()
-  f = await mmu._formatBlock(f, 1, sk)
-  f = await mmu._formatBlock(f, 2, sk)
-  f = await mmu._formatBlock(f, 3, sk)
+  f = await unit._formatBlock(f, 1, sk)
+  f = await unit._formatBlock(f, 2, sk)
+  f = await unit._formatBlock(f, 3, sk)
   await store.dispatch(f)
-  f = await mmu._formatBlock(f, 4, sk)
-  f = await mmu._formatBlock(f, 5, sk)
+  f = await unit._formatBlock(f, 4, sk)
+  f = await unit._formatBlock(f, 5, sk)
   await store.dispatch(f)
   await store.dispatch(f)
   const stored = await store.repo.loadHead(pk)
-  const x = await mmu.readState(0)
+  const x = await unit.readState(0)
   t.is(x, 5, 'Store state is correct')
   t.is(f.length, stored.length, 'All blocks persisted')
 })
 
-// TODO Rewrite this test to validate DispatchContext, ComputeContext, PostapplyContext
-// Dispatch < Compute < Postapply
-skip('Parent block provided to validator', async t => {
-  t.plan(35)
-
-  const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new Store(db)
-
-  const x = store.spec('x', { initialValue: 0, validate: () => true })
-  const y = store.spec('y', {
-    initialValue: 0,
-    validate (value, { block, parentBlock }) {
-      if (block.isGenesis) t.ok(!parentBlock, 'Genesis has no parent')
-      else {
-        t.ok(parentBlock, 'Parent available')
-        t.ok(cmp(block.parentSig, parentBlock.sig))
-      }
-    },
-    reduce ({ block, parentBlock }) {
-      if (block.isGenesis) t.notOk(parentBlock, 'Genesis has no parent')
-      else {
-        t.ok(parentBlock, 'Parent available')
-        t.ok(block.parentSig.equals(parentBlock.sig))
-      }
-      return 0
-    }
-  })
-  await store.load()
-  // -- Let's pause rewriting tests,
-  // we need to experiment to see if this new
-  // pattern actualy is better than previous
-  const f = new Feed()
-  f.append('0', sk)
-  f.append('1', sk)
-  await store.dispatch(f)
-  f.append('2', sk)
-  await store.dispatch(f.slice(-1))
-  f.append('3', sk)
-  await store.dispatch(f)
-  await store.reload()
-})
-
-// @deprecated, slices are async now, so root state dosen't have to be available +readonly anyway
-skip('Root state available in slices', async t => {
-  const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new PicoStore(db)
-
-  store.register('x', 5, () => true, () => 0) // dummy store
-  store.register('y', 7,
-    ({ root }) => {
-      t.ok(root)
-      t.equal(root.x, 5)
-      t.equal(root.y, 7)
-    },
-    ({ root }) => {
-      t.ok(root)
-      t.equal(root.x, 5)
-      t.equal(root.y, 7)
-      return 8
-    }
-  )
-  await store.load()
-  const f = new Feed()
-  f.append('0', sk)
-  await store.dispatch(f, true)
-  t.end()
-})
-
-skip('Same block not reduced twice, given multiple identities', async t => {
+test('Same block not reduced twice, given multiple identities', async t => {
   const a = Feed.signPair().sk
   const b = Feed.signPair().sk
 
   const db = DB()
-  const store = new PicoStore(db)
-  store.register('x', 0, () => false, ({ block, state }) => {
-    const n = parseInt(block.body.toString())
-    t.ok(state < n, 'unseen block')
-    return n
-  }) // dummy store
+  const store = new Engine(db)
+  const unit = store.register('x', makePlainCounter(t))
 
   await store.load()
-  const f = new Feed()
-  f.append('1', a)
-  f.append('2', b)
-  f.append('3', a)
+  let f = new Feed()
+  f = await unit._formatBlock(f, 1, a)
+  f = await unit._formatBlock(f, 2, b)
+  f = await unit._formatBlock(f, 3, a)
   await store.dispatch(f)
-  f.append('4', b)
-  f.append('5', a)
+  f = await unit._formatBlock(f, 4, b)
+  f = await unit._formatBlock(f, 5, a)
   await store.dispatch(f)
   await store.dispatch(f)
 
   const stored = await store.repo.loadHead(f.last.key)
-  t.equal(store.state.x, 5, 'Store state is correct')
-  t.equal(f.length, stored.length, 'All blocks persisted')
+  const x = await unit.readState(0)
+  t.is(x, 5, 'Store state is correct')
+  t.is(f.length, stored.length, 'All blocks persisted')
 })
 
-skip('State modifications are mutex locked', async t => {
+test('State modifications are mutex locked', async t => {
   const { pk, sk } = Feed.signPair()
 
   const db = DB()
-  const store = new PicoStore(db)
-  store.register('x', 0, () => false, ({ block, state }) => {
-    const n = parseInt(block.body.toString())
-    t.ok(state < n, 'unseen block')
-    return n
-  }) // dummy store
+  const store = new Engine(db)
+
+  const unit = store.register('x', makePlainCounter(t))
 
   await store.load()
   const f = new Feed()
-  f.append('1', sk)
-  f.append('2', sk)
-  f.append('3', sk)
-  store.dispatch(f)
-  f.append('4', sk)
-  f.append('5', sk)
+  await unit._formatBlock(f, 1, sk)
+  await unit._formatBlock(f, 2, sk)
+  await unit._formatBlock(f, 3, sk)
+  // const p = store.dispatch(f)
+  await unit._formatBlock(f, 4, sk)
+  await unit._formatBlock(f, 5, sk)
   const f2 = f.clone()
-  f2.append('6', sk)
-  f2.append('7', sk)
+  await unit._formatBlock(f2, 6, sk)
+  await unit._formatBlock(f2, 7, sk)
   const tasks = [
+    // p,
     store.dispatch(f2),
     store.dispatch(f),
     store.dispatch(f2)
   ]
   await Promise.all(tasks)
   const stored = await store.repo.loadHead(pk)
-  t.equal(store.state.x, 7, 'Store state is correct')
-  t.equal(f2.length, stored.length, 'All blocks persisted')
+  const x = await unit.readState(0)
+  t.is(x, 7, 'Store state is correct')
+  t.is(f2.length, stored.length, 'All blocks persisted')
 })
 
-skip('Filter does not run on unmutated state', async t => {
+test('Filter/Compute does not run on unmutated state', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
-  const store = new PicoStore(db)
-  store.register('x', 0,
-    ({ block, state }) => {
-      const n = parseInt(block.body.toString())
-      if (state !== n - 1) return 'InvalidSequence'
-    },
-    ({ block, state }) => parseInt(block.body.toString())
-  )
-
-  await store.load()
-  const f = new Feed()
-  f.append('1', sk)
-  await store.dispatch(f, true)
-  f.append('2', sk)
-  f.append('3', sk)
-  f.append('4', sk)
-  f.append('5', sk)
-  await store.dispatch(f, true)
-  t.equal(store.state.x, 5)
-})
-
-skip('reducerContext.signal(int, payload)', async t => {
-  /**
-   * Each slices provides their own registers, a memory region
-   * that they own and maintain.
-   * When a high-level change happens in one slice that needs to be
-   * reflected in another. I want to change the dispatch lifecycle:
-   * - Phase 0: canMerge?(patch)
-   * - Phase 1: slice.filter(block)
-   * - Phase 2: slice.reduce(block) =>  lv0 state, interrupts
-   * + Phase 3: slice.handleInterrupts(interrupts) => lv1 state
-   * - Phase 4: notify slice.observers
-   *
-   *   Introduces internal high-priority higher-level-events that run before
-   *   register observers are notified.
-   */
-  // The Problem:
-  const db = DB()
-  const store = new PicoStore(db)
-  const INT_RST = 0 // 'reset'-interrupt
-  let resetFired = 0
-  // X.slice is a incremental counter
-  store.register({
-    name: 'x',
-    initialValue: 0,
-    filter: ({ block, state }) => {
-      return parseInt(block.body.toString()) > state
-        ? false // accept
-        : 'XValueTooLow' // reject
-    },
-    reducer: ({ block, state }) => parseInt(block.body.toString()),
-    trap: ({ code, payload, state, root }) => {
-      if (code !== INT_RST) return // undefined return means trap not triggered.
-      t.equal(code, INT_RST)
-      t.equal(payload, 'hit-the-brakes!', 'playload visible')
-      t.ok(root)
-      resetFired++
-      return 0
-    }
-  })
-  // Y.slice computes (x^2) and signals reset at a threshhold
-  function compute (x) { return x * x }
-  store.register({
-    name: 'y',
-    initialValue: 0,
-    filter: ({ block, state }) => {
-      return compute(parseInt(block.body.toString())) > state
-        ? false // accept
-        : 'YValueTooLow' // reject
-    },
-    reducer: ({ block, state, root, signal }) => {
-      const y = compute(parseInt(block.body.toString()))
-      if (y > root.x * 5) { // Too fast, reset throttle
-        t.equal(typeof signal, 'function', 'signal method provided in context')
-        signal(INT_RST, 'hit-the-brakes!')
-        return 0
-      } else return y // accellerate as usual
+  const store = new Engine(db)
+  const unit = store.register('x', class extends Memory {
+    initialValue = 0
+    async idOf () { return 0 }
+    async compute (state, { payload, reject }) {
+      if (state !== payload - 1) return reject(`Expected '${state}' < '${payload}'`)
+      return payload
     }
   })
   await store.load()
-  const { sk } = Feed.signPair()
   const f = new Feed()
-  f.append('1', sk)
+  await unit._formatBlock(f, 1, sk)
   await store.dispatch(f, true)
-  t.equal(resetFired, 0, 'Signal not yet triggered')
-  f.append('2', sk)
-  f.append('3', sk)
-  f.append('4', sk)
-  f.append('5', sk)
+  await unit._formatBlock(f, 2, sk)
+  await unit._formatBlock(f, 3, sk)
+  await unit._formatBlock(f, 4, sk)
+  await unit._formatBlock(f, 5, sk)
   await store.dispatch(f, true)
-  t.equal(resetFired, 0, 'not yet')
-  f.append('6', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 1, 'Fired')
-  t.equal(store.state.x, 0)
-  t.equal(store.state.y, 0)
-  f.append('3', sk)
-  f.append('4', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 1, 'reset still only once')
-  t.equal(store.state.x, 4, 'Counter works after reset')
-  t.equal(store.state.y, 16)
+  t.is(await unit.readState(0), 5)
 })
 
-skip('Allow multiple feeds from same author', async t => {
+test('Allow multiple feeds from same author (1K)', async t => {
   const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new PicoStore(db)
-  store.repo.allowDetached = true
-
-  store.register('x', [],
-    ({ block, state }) => false,
-    ({ block, state }) => [...state, parseInt(block.body.toString())]
-  )
+  const store = new Engine(DB())
+  store.repo.allowDetached = true // TODO: make default behaviour
+  const unit = store.register('x', class extends Memory {
+    idOf () { return 0 } // Single global register
+    initialValue = []
+    compute (state, { payload }) {
+      return [...state, payload] // Just concat in new values
+    }
+  })
 
   await store.load()
   const a = new Feed()
-  a.append('1', sk)
-  a.append('7', sk)
+  await unit._formatBlock(a, 1, sk)
+  await unit._formatBlock(a, 7, sk)
   await store.dispatch(a, true)
 
   const b = new Feed()
-  b.append('2', sk)
-  b.append('9', sk)
-
+  await unit._formatBlock(b, 2, sk)
+  await unit._formatBlock(b, 9, sk)
   await store.dispatch(b, true)
 
   // await require('picorepo/dot').dump(store.repo)
-  t.deepEqual(store.state.x, [1, 7, 2, 9])
+  t.alike(await unit.readState(0), [1, 7, 2, 9])
 })
 
 skip('Dispatching blocks one at a time', async t => {
@@ -612,6 +456,161 @@ skip('Block cache solves out of order blocks', async t => {
   m = await store.dispatch(slice3)
   t.ok(m.length, 'blocks merged')
   t.equal(store.state.x, 9)
+})
+
+
+// TODO Rewrite this test to validate DispatchContext, ComputeContext, PostapplyContext
+// Dispatch < Compute < Postapply
+skip('Parent block provided to validator', async t => {
+  t.plan(35)
+
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new Store(db)
+
+  const x = store.spec('x', { initialValue: 0, validate: () => true })
+  const y = store.spec('y', {
+    initialValue: 0,
+    validate (value, { block, parentBlock }) {
+      if (block.isGenesis) t.ok(!parentBlock, 'Genesis has no parent')
+      else {
+        t.ok(parentBlock, 'Parent available')
+        t.ok(cmp(block.parentSig, parentBlock.sig))
+      }
+    },
+    reduce ({ block, parentBlock }) {
+      if (block.isGenesis) t.notOk(parentBlock, 'Genesis has no parent')
+      else {
+        t.ok(parentBlock, 'Parent available')
+        t.ok(block.parentSig.equals(parentBlock.sig))
+      }
+      return 0
+    }
+  })
+  await store.load()
+  // -- Let's pause rewriting tests,
+  // we need to experiment to see if this new
+  // pattern actualy is better than previous
+  const f = new Feed()
+  f.append('0', sk)
+  f.append('1', sk)
+  await store.dispatch(f)
+  f.append('2', sk)
+  await store.dispatch(f.slice(-1))
+  f.append('3', sk)
+  await store.dispatch(f)
+  await store.reload()
+})
+
+// @deprecated, slices are async now, so root state dosen't have to be available +readonly anyway
+skip('Root state available in slices', async t => {
+  const { sk } = Feed.signPair()
+  const db = DB()
+  const store = new PicoStore(db)
+
+  store.register('x', 5, () => true, () => 0) // dummy store
+  store.register('y', 7,
+    ({ root }) => {
+      t.ok(root)
+      t.equal(root.x, 5)
+      t.equal(root.y, 7)
+    },
+    ({ root }) => {
+      t.ok(root)
+      t.equal(root.x, 5)
+      t.equal(root.y, 7)
+      return 8
+    }
+  )
+  await store.load()
+  const f = new Feed()
+  f.append('0', sk)
+  await store.dispatch(f, true)
+  t.end()
+})
+
+// TODO: port to V3, game-of-bumps informally tests signals, but clean signal API test is good
+skip('reducerContext.signal(int, payload)', async t => {
+  /**
+   * Each slices provides their own registers, a memory region
+   * that they own and maintain.
+   * When a high-level change happens in one slice that needs to be
+   * reflected in another. I want to change the dispatch lifecycle:
+   * - Phase 0: canMerge?(patch)
+   * - Phase 1: slice.filter(block)
+   * - Phase 2: slice.reduce(block) =>  lv0 state, interrupts
+   * + Phase 3: slice.handleInterrupts(interrupts) => lv1 state
+   * - Phase 4: notify slice.observers
+   *
+   *   Introduces internal high-priority higher-level-events that run before
+   *   register observers are notified.
+   */
+  // The Problem:
+  const db = DB()
+  const store = new PicoStore(db)
+  const INT_RST = 0 // 'reset'-interrupt
+  let resetFired = 0
+  // X.slice is a incremental counter
+  store.register({
+    name: 'x',
+    initialValue: 0,
+    filter: ({ block, state }) => {
+      return parseInt(block.body.toString()) > state
+        ? false // accept
+        : 'XValueTooLow' // reject
+    },
+    reducer: ({ block, state }) => parseInt(block.body.toString()),
+    trap: ({ code, payload, state, root }) => {
+      if (code !== INT_RST) return // undefined return means trap not triggered.
+      t.equal(code, INT_RST)
+      t.equal(payload, 'hit-the-brakes!', 'playload visible')
+      t.ok(root)
+      resetFired++
+      return 0
+    }
+  })
+  // Y.slice computes (x^2) and signals reset at a threshhold
+  function compute (x) { return x * x }
+  store.register({
+    name: 'y',
+    initialValue: 0,
+    filter: ({ block, state }) => {
+      return compute(parseInt(block.body.toString())) > state
+        ? false // accept
+        : 'YValueTooLow' // reject
+    },
+    reducer: ({ block, state, root, signal }) => {
+      const y = compute(parseInt(block.body.toString()))
+      if (y > root.x * 5) { // Too fast, reset throttle
+        t.equal(typeof signal, 'function', 'signal method provided in context')
+        signal(INT_RST, 'hit-the-brakes!')
+        return 0
+      } else return y // accellerate as usual
+    }
+  })
+  await store.load()
+  const { sk } = Feed.signPair()
+  const f = new Feed()
+  f.append('1', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 0, 'Signal not yet triggered')
+  f.append('2', sk)
+  f.append('3', sk)
+  f.append('4', sk)
+  f.append('5', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 0, 'not yet')
+  f.append('6', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 1, 'Fired')
+  t.equal(store.state.x, 0)
+  t.equal(store.state.y, 0)
+  f.append('3', sk)
+  f.append('4', sk)
+  await store.dispatch(f, true)
+  t.equal(resetFired, 1, 'reset still only once')
+  t.equal(store.state.x, 4, 'Counter works after reset')
+  t.equal(store.state.y, 16)
 })
 
 skip('Simple stupid slice with crude manual boring garbage collection', async t => {
