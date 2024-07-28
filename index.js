@@ -45,19 +45,10 @@ const SymSignal = Symbol.for('PiC0VM::signal')
  */
 
 /**
- * A slice of the decentralized state.
+ * A memory slice of the decentralized state.
  * Create a subclass of Memory to compute your own
- * distributed collection and define rules to how it should
+ * distributed collection and define the rules to how it should
  * behave.
- *
- * Usage when subclassing:
- * engine.register('myCollection', class extends Memory {
- *    idOf ({ CHAIN, AUTHOR }) { return 0 }
- *
- *
- * })
- *
- *
  */
 export class Memory {
   initialValue = undefined
@@ -67,7 +58,7 @@ export class Memory {
   #head = undefined
 
   /**
-   * @param {Store} store
+   * @param {Engine} store
    * @param {string} name
    */
   constructor (store, name) {
@@ -86,7 +77,7 @@ export class Memory {
     this.#head = undefined
   }
 
-  /** @return {Store} */
+  /** @return {Engine} */
   get store () { return this.#store }
   get state () { return clone(this.#cache) }
 
@@ -404,7 +395,7 @@ export class Engine {
   /**
    * Initializes a managed decentralized memory area
    * @param {string} name - The name of the collection
-   * @param {() => Memory} MemoryClass - Constructor of Memory or subclass
+   * @param {new (...args: any[]) => Memory} MemoryClass - Constructor of Memory or subclass
    * @return {Memory} - An instance of the MemorySubClass
    */
   register (name, MemoryClass) {
@@ -829,7 +820,7 @@ export function tripWire (o, path = []) {
       }
     },
     set (_, key) {
-      throw new Error(`Attempted to modifiy: ${path.join('.')}[${key}]`)
+      throw new Error(`Attempted to modifiy: ${path.join('.')}[${String(key)}]`)
     }
   })
 }
