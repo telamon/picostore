@@ -429,12 +429,13 @@ export class Engine {
     // console.info('event:', event, payload.root)
     if (typeof this.#tap === 'function') this.#tap(event, payload)
   }
+
   /**
    * Tap into internal eventlog, useful for debugging.
    * @type {(cb: (event:string, payload: any) => void) => void}
    */
   tap (cb) {
-    if (typeof cb !== 'function') throw new Error("Expected callback to be function")
+    if (typeof cb !== 'function') throw new Error('Expected callback to be function')
     this.#tap = cb
   }
 

@@ -1,4 +1,4 @@
-import { test, skip, solo } from 'brittle'
+import { test, skip } from 'brittle'
 import { Feed, toU8, cmp, toHex, isBlock } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
