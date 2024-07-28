@@ -67,7 +67,7 @@ export class Bumps extends Memory {
   }
 
   /* @override */
-  async compute (currentValue, { payload, date, AUTHOR, block, postpone, reject, lookup }) {
+  async compute (currentValue, { payload, date, AUTHOR, block, postpone, reject, lookup, index, signal }) {
     if (payload.type === 'bump') {
       const to = toHex(payload.target)
       // Validate block
@@ -83,6 +83,7 @@ export class Bumps extends Memory {
       if (!peer) return postpone(10000, 'NoGhostBumps', 3) // Postpone upto 3 Times then RejectionMessage
 
       // Return new state
+      await index(AUTHOR)
       return { ...currentValue, from: AUTHOR, to, status: 'pending', date }
     } else if (payload.type === 'response') {
       // Validate block
@@ -90,17 +91,12 @@ export class Bumps extends Memory {
       if (currentValue.to !== blockAuthor) return reject('NotYourBump')
       if (![true, false].includes(payload.ok)) return reject('InvalidResponse')
       // Return new state
-      return { ...currentValue, status: payload.ok ? 'accepted' : 'rejected', date }
+      const out =  { ...currentValue, status: payload.ok ? 'accepted' : 'rejected', date }
+      signal('bump-settled', { to: out.to, from: out.from, status: out.status })
+      return out
     } else {
       return reject('InvalidType')
     }
-  }
-
-  /* @override */
-  async postapply (value, { AUTHOR, id, signal, index }) {
-    const { status, to, from } = value
-    if (status === 'pending') await index(AUTHOR, id) // PHASE: on-apply
-    else signal('bump-settled', { to, from, status }) // PHASE: on-apply
   }
 
   /* @override */

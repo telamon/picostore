@@ -36,13 +36,11 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       id: ObjectId,
       reject: (message) => Rejection,
       postpone: (timeMillis: number, errorMsg: string, nTries: 3) => Reschedule,
-      lookup: (key: u8|string) => Promise<BlockID>
+      lookup: (key: u8|string) => Promise<BlockID>,
+      index: (key: u8|string) => void,
+      signal: (name: string, payload: any) => void
     }} ComputeContext
 
-    @typedef { DispatchContext & {
-      index: (key: u8|string) => Promise<Void>,
-      signal: (name: string, payload: any) => void
-    }} PostapplyContext
     @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
  */
 
@@ -108,8 +106,6 @@ export class Memory {
     * @return {Promise<Rejection|Reschedule|any>} The new value */
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
 
-  async postapply (value, ctx) { }
-
   /// End of hooks
 
   async readState (id) {
@@ -173,28 +169,30 @@ export class Memory {
       return abortMerge
     }
 
+    const signals = []
+    const indices = []
     // Phase1: Compute State change
     const computeContext = /** @type {ComputeContext} */ {
       ...ctx,
       id,
       reject,
       postpone,
-      lookup: key => this.#lookup(key)
+      index: key => indices.push(key), // Index op is post-apply
+      lookup: async key => this.#lookup(key), // Lookups are immediate
+      // Signals are always exected after a block
+      signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, rootName: this.name })
     }
 
     const draft = await this.compute(value, computeContext)
 
     if (abortMerge) return abortMerge
 
-    // Phase2: Apply the draft and run the post-apply hook
+    // Phase2: Apply the draft and run indice-ops
     await this._writeState(id, draft)
-    const signals = []
-    await this.postapply(draft, {
-      ...ctx,
-      index: key => this.#index(key, block.id),
-      // Signals are executed between two block-states
-      signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, rootName: this.name })
-    })
+
+    for (const key of indices) {
+      await this.#index(key, block.id)
+    }
 
     // Phase3: Schedule deinitialization & increment reference counts
     const latch = this.store._latchExpireAt.bind(this.store, 0)

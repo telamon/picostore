@@ -1,4 +1,4 @@
-import { Feed, Block, toHex, hexdump, feedFrom } from 'picofeed'
+import { Block, feedFrom } from 'picofeed'
 // TODO:
 // - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)

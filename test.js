@@ -1,5 +1,5 @@
 import { test, skip, solo } from 'brittle'
-import { Feed, toU8, cmp } from 'picofeed'
+import { Feed, toU8, cmp, toHex, isBlock } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
 import { decode } from 'cborg'
@@ -91,46 +91,7 @@ test('DVM3.x Conways Game Of Bumps', async t => {
   t.is(Object.values(bumps.state).length, 0, 'Bumps Cleared')
 })
 
-skip('poh-compatible block indexer', async t => {
-  const { pk, sk } = Feed.signPair()
-  const db = DB()
-  const store = new Engine(db)
-  // API Change
-  const collection = store.spec('players', {
-    initialValue: {
-      state: 'idle',
-      x: 0,
-      y: 15
-    },
-    id: ({ AUTHOR }) => AUTHOR, // PK<Author>|ChainID<Task>|BlockID<Chat,Battle>
-    validate: (ctx) => { debugger; false }, // ErrorMSG|void
-    expiresAt: date => date + 10000,
-
-    async reduce (state, payload, ctx) {
-      debugger;
-      return state
-    }
-  })
-  await store.load()
-  let v = await collection.readState(pk)
-  const actions = [
-    ['move', 50, 50],
-    ['move', 25, 50],
-    ['say', 'Hello?? Can anyone hear me?'],
-    ['move', 45, 25],
-    ['say', 'Here we go'],
-    ['fight'],
-    ['rip']
-  ]
-  for (const op of actions) {
-    // manual mutation
-    const b = await collection.mutate(null, op, sk)
-  }
-  actions.inspect()
-  await store.dispatch(actions.block(0))
-})
-
-test('PicoStore 2.x scenario', async t => {
+test('PicoStore 2.x/ counters scenario', async t => {
   const store = new Engine(DB())
 
   class Counter extends Memory {
@@ -432,48 +393,54 @@ test('Block cache solves out of order blocks', async t => {
   t.is(await unit.readState(0), 9, 'cache flushed all blocks merged')
 })
 
-
 // TODO Rewrite this test to validate DispatchContext, ComputeContext, PostapplyContext
 // Dispatch < Compute < Postapply
-skip('Parent block provided to validator', async t => {
-  t.plan(35)
-
+test('The ComputeContext and callback API', async t => {
   const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new Store(db)
+  const engine = new Engine(DB())
+  let _block = null
+  const unit = engine.register('mySlice', class extends Memory {
+    initialValue = { name: 'unnamed player', hp: 10 }
 
-  const x = store.spec('x', { initialValue: 0, validate: () => true })
-  const y = store.spec('y', {
-    initialValue: 0,
-    validate (value, { block, parentBlock }) {
-      if (block.isGenesis) t.ok(!parentBlock, 'Genesis has no parent')
-      else {
-        t.ok(parentBlock, 'Parent available')
-        t.ok(cmp(block.parentSig, parentBlock.sig))
-      }
-    },
-    reduce ({ block, parentBlock }) {
-      if (block.isGenesis) t.notOk(parentBlock, 'Genesis has no parent')
-      else {
-        t.ok(parentBlock, 'Parent available')
-        t.ok(block.parentSig.equals(parentBlock.sig))
-      }
+    idOf ({ AUTHOR, CHAIN}) {
+      t.is(AUTHOR, toHex(_block.key), 'AUTHOR is a hexstring of block.key')
+      t.is(CHAIN, toHex(_block.sig), 'CHAIN is a hexstring of block.sig')
       return 0
     }
+
+    /** @type {(value: any, ctx: ComputeContext) => any} */
+    async compute (value, ctx) {
+      t.ok(value !== this.initialValue)
+      t.alike(value, this.initialValue, 'current value = deep clone of initial value')
+      // DispatchContext
+      t.ok(isBlock(ctx.block), 'ctx.block = PicoBlock')
+      t.is(ctx.parentBlock, null, 'ctx.parentBlock = PicoBlock|null')
+      t.is(typeof ctx.AUTHOR, 'string', 'ctx.AUTHOR = hexstring')
+      t.is(typeof ctx.CHAIN, 'string', 'ctx.CHAIN = hexstring')
+      t.is(ctx.root, 'mySlice', 'ctx.root = Name of memory unit')
+      t.alike(ctx.payload, { type: 'spawn', name: 'bob'}, 'ctx.payload = user input')
+      t.is(typeof ctx.date, 'number', 'ctx.date = Block date')
+      // ComputeContext
+      //
+      t.is(ctx.id, 0, 'ctx.id = Object id')
+      t.is(typeof ctx.reject, 'function', 'ctx.reject = function')
+      t.is(typeof ctx.postpone, 'function', 'ctx.postpone = function')
+      t.is(typeof ctx.lookup, 'function', 'ctx.lookup = function')
+
+      t.is(typeof ctx.index, 'function', 'ctx.index = function')
+      t.is(typeof ctx.signal, 'function', 'ctx.signal = function')
+
+      await ctx.index('bob') // Index player-name => chain
+
+      ctx.signal('new-player', 'bob')
+      return { ...value, name: ctx.payload.name }
+    }
   })
-  await store.load()
-  // -- Let's pause rewriting tests,
-  // we need to experiment to see if this new
-  // pattern actualy is better than previous
-  const f = new Feed()
-  f.append('0', sk)
-  f.append('1', sk)
-  await store.dispatch(f)
-  f.append('2', sk)
-  await store.dispatch(f.slice(-1))
-  f.append('3', sk)
-  await store.dispatch(f)
-  await store.reload()
+
+  await engine.load()
+  const feed = await unit.formatPatch(null, { type: 'spawn', name: 'bob' }, sk)
+  _block = feed.last
+  await engine.dispatch(feed, true)
 })
 
 // TODO: port to V3, game-of-bumps informally tests signals, but clean signal API test is good
@@ -494,27 +461,22 @@ test('reducerContext.signal(int, payload)', async t => {
    */
   // The Problem:
   const store = new Engine(DB())
-  const INT_RST = 0 // 'reset'-interrupt
   let resetFired = 0
   // X.slice is a incremental counter
   const unitX = store.register('x', class extends Memory {
     initialValue = 0
-    idOf() { return 0 }
+    idOf () { return 0 }
     /** @override */
-    compute (value, { payload, reject }) {
+    compute (value, { payload, reject, signal }) {
       if (payload <= value) return reject('value too low')
+      if (!(payload % 2)) signal('even-value', payload)
       return payload
     }
-
-    /** @override */
-    async postapply (value, { AUTHOR , signal, index }) { // TODO: document/test index
-      if (!(value % 2)) signal('even-value', value)
-      // await index(AUTHOR, id) // PHASE: on-apply
-    }
   })
+
   const unitY = store.register('y', class extends Memory {
     initialValue = 0
-    idOf() { return 0 }
+    idOf () { return 0 }
     compute (_, { reject }) { return reject('Y listens only to signals') }
 
     async trap (signalName, signalPayload, mutate) {
@@ -541,6 +503,7 @@ test('reducerContext.signal(int, payload)', async t => {
   t.is(await unitY.readState(0), 4, 'Y = 4')
 })
 
+// @deprecated I believe
 skip('Simple stupid slice with crude manual boring garbage collection', async t => {
   const store = new PicoStore(DB())
   store.repo.allowDetached = true
