@@ -56,6 +56,8 @@ export class Memory {
   #cache = {} // in-memory cached state
   #version = 0
   #head = undefined
+  /** @type {function[]} */
+  #observers = []
 
   /**
    * @param {Engine} store
@@ -79,7 +81,7 @@ export class Memory {
 
   /** @return {Engine} */
   get store () { return this.#store }
-  get state () { return clone(this.#cache) }
+  get state () { return tripWire(this.#cache) }
 
   /// Begin hooks
 
@@ -114,13 +116,13 @@ export class Memory {
   async _writeState (id, o) {
     if (id instanceof Uint8Array) id = toHex(id)
     this.#cache[id] = o
-    this.store._notify('change', { root: this.name, id, value: o })
+    this._notify('change', { root: this.name, id, value: o })
   }
 
   async _sweepState (id) {
     if (id instanceof Uint8Array) id = toHex(id)
     delete this.#cache[id]
-    this.store._notify('change', { root: this.name, id, value: undefined })
+    this._notify('change', { root: this.name, id, value: undefined })
   }
 
   /**
@@ -232,7 +234,7 @@ export class Memory {
     this.#cache = state
     this.version = version
     this.head = head
-    this.store._notify('change', { root: this.name })
+    this._notify('change', { root: this.name })
   }
 
   /**
@@ -288,8 +290,18 @@ export class Memory {
     return feed
   }
 
+  // TODO: we are able to do filtered subscriptions now with the _notify function.
   sub (observer) {
-    throw new Error('TODO: Implement memory subscriptions')
+    if (typeof observer !== 'function') throw new Error('observer must be a function')
+    this.#observers.push(observer)
+    observer(this.state)
+    return () => this.#observers.splice(this.#observers.indexOf(observer), 1)
+  }
+
+  _notify (event, payload) {
+    const state = this.state
+    for (const cb of this.#observers) cb(state)
+    this.store._notify(event, payload) // forward
   }
 }
 
@@ -372,7 +384,7 @@ function mkRefKey (blockRoot, stateRoot, objId = null) {
 }
 
 export class Engine {
-  /** @type {Record<string,Memory>} */
+  /** @type {Record<string, Memory>} */
   roots = {} // StateRoots
   _loaded = false
   _tap = null // global signal trap
@@ -400,6 +412,7 @@ export class Engine {
 
   /**
    * Initializes a managed decentralized memory area
+   * @template T extends Memory
    * @param {string} name - The name of the collection
    * @param {new (...args: any[]) => Memory} MemoryClass - Constructor of Memory or subclass
    * @return {Memory} - An instance of the MemorySubClass
@@ -407,13 +420,22 @@ export class Engine {
   register (name, MemoryClass) {
     if (this._loaded) throw new Error('Hotconf not supported')
     if (!(MemoryClass.prototype instanceof Memory)) throw new Error('Expected a subclass of Memory')
-    const c = new MemoryClass(this, name)
-    this.roots[name] = c
-    return c
+    this.roots[name] = new MemoryClass(this, name)
+    return this.roots[name]
   }
 
+  #tap = null
   _notify (event, payload) {
     // console.info('event:', event, payload.root)
+    if (typeof this.#tap === 'function') this.#tap(event, payload)
+  }
+  /**
+   * Tap into internal eventlog, useful for debugging.
+   * @type {(cb: (event:string, payload: any) => void) => void}
+   */
+  tap (cb) {
+    if (typeof cb !== 'function') throw new Error("Expected callback to be function")
+    this.#tap = cb
   }
 
   async _refIncrement (blockRoot, stateRoot, objId) {
@@ -675,11 +697,10 @@ export class Engine {
   // Nuro Shortcut
   $ (name) { return sub => this.on(name, sub) }
 
-  on (name, observer) {
+  on (name, ...args) {
     const collection = this.roots[name]
     if (!collection) throw new Error(`No collection named "${name}"`)
-    if (typeof observer !== 'function') throw new Error('observer must be a function')
-    return collection.sub(observer)
+    return collection.sub(...args)
   }
 
   async gc (now) {

@@ -1,4 +1,4 @@
-import { test, skip } from 'brittle'
+import { test, skip, solo } from 'brittle'
 import { Feed, toU8, cmp, toHex, isBlock } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
@@ -617,4 +617,33 @@ skip('util.ICE: A tripwire object proxy', async t => {
   sieved.key = new Uint8Array(32)
   sieved.desc = 'a beta tester'
   console.log(thaw(sieved))
+})
+
+/*
+ * I think there is vast room for improvement here,
+ * atm we support old picostore2.x api
+ */
+test('MemorySlices can be subscribed', async t => {
+  const eng = new Engine(DB())
+  /** @type {DiffMemory} */
+  const unit = eng.register('peers', class extends DiffMemory {
+    initialValue = { name: 'bob', ping: 0 }
+  })
+  await eng.load()
+  let observations = 0
+  const unsub1 = eng.on('peers', value => {
+    observations++
+    // console.log('Changed', value)
+  })
+  const A = Feed.signPair()
+  const feedA = await unit.mutate(null, value => ({ ...value, name: 'Alice', ping: 1 + value.ping }), A.sk)
+  await unit.mutate(feedA, value => ({ ...value, ping: 1 + value.ping }), A.sk)
+
+  const B = Feed.signPair()
+  const feedB = await unit.mutate(null, value => ({ ...value, ping: 5 + value.ping }), B.sk)
+  await unit.mutate(feedB, value => ({ ...value, ping: 5 + value.ping }), B.sk)
+  await unit.mutate(feedA, value => ({ ...value, ping: 1 + value.ping }), A.sk)
+  unsub1()
+  await unit.mutate(feedB, value => ({ ...value, ping: 5 + value.ping }), B.sk)
+  t.is(observations, 6)
 })
