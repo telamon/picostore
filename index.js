@@ -36,7 +36,7 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       id: ObjectId,
       reject: (message) => Rejection,
       postpone: (timeMillis: number, errorMsg: string, nTries: 3) => Reschedule,
-      lookup: (key: u8|string) => Promise<BlockID>,
+      lookup: (key: u8|string) => Promise<BlockID|void>,
       index: (key: u8|string) => void,
       signal: (name: string, payload: any) => void
     }} ComputeContext
@@ -265,22 +265,27 @@ export class Memory {
    * @param {BlockID|Feed} branch // TODO formalize actual input
    * @param {any} payload Your state-changes/instructions
    * @param {SecretKey} secret Signing secret
-   * @return {Feed} Feed containing merged blocks
+   * @return {Promise<Feed>} Feed containing merged blocks
    */
   async createBlock (branch, payload, secret) {
-    branch = await this.formatPatch(branch, payload, secret)
-    return await this.store.dispatch(branch, true)
+    const patch = await this.formatPatch(branch, payload, secret)
+    return await this.store.dispatch(patch, true)
   }
 
   /**
    * Same as createBlock except does not dispatch.
    * used for simulating scenarios in tests.
-   * use createBlock in production. */
+   * use createBlock in production.
+   * @param {BlockID|Feed} branch
+   * @param {any} payload Your state-changes/instructions
+   * @param {SecretKey} secret Signing secret
+   * @return {Promise<Feed>} Feed containing merged blocks
+  */
   async formatPatch (branch, payload, secret) {
-    branch = await this.store.readBranch(branch)
+    const feed = await this.store.readBranch(branch)
     // TODO: move Date and Collection name to BlockHeaders
-    branch.append(encode([this.name, payload, Date.now()]), secret)
-    return branch
+    feed.append(encode([this.name, payload, Date.now()]), secret)
+    return feed
   }
 
   sub (observer) {
@@ -386,6 +391,7 @@ export class Engine {
     this.cache = new Mempool(this.repo._db)
     this._gc = new Scheduler(this.repo)
     this._strategy = mergeStrategy || (() => {})
+    /** @type {import('abstract-level').AbstractSublevel} */
     this._refReg = this.repo._db.sublevel('REFs', {
       keyEncoding: 'view',
       valueEncoding: 'view'
@@ -422,7 +428,7 @@ export class Engine {
     const nRefs = await this.referencesOf(blockRoot)
     if (!nRefs) {
       // TODO: passing objId as stop could potentially allow partial rollback
-      const evicted = await this.repo.rollback(blockRoot)
+      const evicted = await this.repo.rollback(blockRoot, null)
       this._notify('rollback', { evicted, root: stateRoot })
       return evicted
     }
@@ -447,7 +453,7 @@ export class Engine {
   }
 
   /** Fetches a writable feed
-   *  @param {undefined|BlockID|PublicKey} branch
+   *  @param {undefined|Feed|BlockID|PublicKey} branch
     * @return {Promise<Feed>} */
   async readBranch (branch) {
     if (!branch) return new Feed()
@@ -562,7 +568,7 @@ export class Engine {
     const _first = patch.blocks[patch.blocks.length - diff]
     if (!_first.genesis && !local.length) {
       if (loud) throw new Error('NoCommonParent')
-      return []
+      return
     } else if (!_first.genesis && local.length) {
       const it = local.blocks[Symbol.iterator]()
       let res = it.next()
@@ -646,7 +652,7 @@ export class Engine {
       const modified = new Set()
       for (const { key: ptr, value: CHAIN } of feeds) {
         const feed = await this.repo.loadFeed(ptr)
-        const tags = { AUTHOR: feed.first.key, CHAIN }
+        const tags = { AUTHOR: toHex(feed.first.key), CHAIN: toHex(CHAIN) }
         let parentBlock = null
 
         for (const block of feed.blocks) {

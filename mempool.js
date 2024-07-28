@@ -33,10 +33,10 @@ export default class MemPool {
     while (1) {
       const block = await this._readBlock(next)
       if (!block) break
-      delRefs.push(block.parentSig)
-      delBlocks.push(block.parentSig)
+      delRefs.push(block.psig)
+      delBlocks.push(block.psig)
       blocks.push(block)
-      next = block.parentSig
+      next = block.psig
     }
     if (blocks.length) segments.push(feedFrom(blocks, true))
 

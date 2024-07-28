@@ -28,14 +28,14 @@
     "c8": "^10.1.2",
     "cborg": "^4.2.3",
     "memory-level": "^1.0.0",
-    "picofeed": "^8.0.0",
+    "picofeed": "^8.0.3",
     "piconuro": "^1.0.1",
-    "picorepo": "^2.2.0",
+    "picorepo": "^2.2.2",
     "standard": "^17.1.0"
   },
   "peerDependencies": {
     "cborg": "^4.0.5",
-    "picofeed": "^8.0.0",
-    "picorepo": "^2.2.0"
+    "picofeed": "^8.0.3",
+    "picorepo": "^2.2.2"
   }
 }
