@@ -1,8 +1,8 @@
 import { Repo } from 'picorepo'
 import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 // import { init, get } from 'piconuro'
-import Cache from './cache.js'
-import GarbageCollector from './gc.js' // TODO: rename to scheduler?
+import Mempool from './mempool.js'
+import Scheduler from './scheduler.js' // TODO: rename to scheduler?
 import { encode, decode } from 'cborg'
 
 const SymPostpone = Symbol.for('PiC0VM::postpone')
@@ -383,8 +383,8 @@ export class Engine {
 
   constructor (db, mergeStrategy) {
     this.repo = Repo.isRepo(db) ? db : new Repo(db)
-    this.cache = new Cache(this.repo._db)
-    this._gc = new GarbageCollector(this.repo)
+    this.cache = new Mempool(this.repo._db)
+    this._gc = new Scheduler(this.repo)
     this._strategy = mergeStrategy || (() => {})
     this._refReg = this.repo._db.sublevel('REFs', {
       keyEncoding: 'view',
@@ -467,7 +467,7 @@ export class Engine {
     let timeoutError = null
     try { throw new Error('MutexTimeout') } catch (err) { timeoutError = err }
 
-    await locks.request('default', async () => {
+    await locks.request('default', null, async () => {
       const timerId = setTimeout(() => {
         console.error('MutexTimeout', timeoutError.stack)
         reject(timeoutError)
@@ -712,26 +712,26 @@ export class Engine {
 
 function assert (c, m) { if (!c) throw new Error(m || 'AssertionError') }
 
-// Weblocks shim
+// Weblocks shim when navigator||Lockmanager is missing
 const locks = (
-  typeof window !== 'undefined' &&
-  // @ts-ignore
-  window.navigator?.locks
+  globalThis.navigator?.locks
 ) || {
   resources: {},
   async request (resource, options, handler) {
+    const callback = /** @type {function} */ handler || options
+    // @ts-ignore
     const resources = locks.resources
     if (!resources[resource]) resources[resource] = Promise.resolve()
     const prev = resources[resource]
     resources[resource] = prev
       .catch(err => console.warn('Previous lock unlocked with error', err))
-      .then(() => (handler || options)())
+      .then(callback)
     await prev
   }
 }
 
 /** @return {[Promise, (v: any) => void, (e: Error) => void]} */
-function unpromise () {
+export function unpromise () {
   let solve, eject
   const p = new Promise((resolve, reject) => { solve = resolve; eject = reject })
   return [p, solve, eject]

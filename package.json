@@ -5,12 +5,13 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "lint": "standard",
+    "lint": "standard --fix",
     "test": "node test.js",
     "debug": "node inspect test.js",
     "prepublishOnly": "standard && npm test",
-    "types": "tsc  --emitDeclarationOnly --allowJs --skipLibCheck --checkJs --declaration --removeComments --lib es2022,dom --target es2022 --moduleResolution nodenext --module nodenext --outFile=index index.js"
+    "types": "tsc  --emitDeclarationOnly --allowJs --skipLibCheck --checkJs --declaration --removeComments --lib es2022 --target es2022 --moduleResolution nodenext --module nodenext --outFile index index.js"
   },
+  "types": "index.d.ts",
   "repository": {
     "type": "git",
     "url": "git://github.com/telamon/picostore"
@@ -22,6 +23,7 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
+    "@types/web": "^0.0.151",
     "brittle": "^3.6.1",
     "c8": "^10.1.2",
     "cborg": "^4.2.3",

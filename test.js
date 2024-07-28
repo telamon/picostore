@@ -1,4 +1,4 @@
-import { test, skip, solo } from 'brittle'
+import { test, skip } from 'brittle'
 import { Feed, toU8, cmp, toHex, isBlock } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
@@ -7,6 +7,7 @@ import { decode } from 'cborg'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
 import { Engine, DiffMemory, Memory } from './index.js'
+import { ice, thaw } from './ice.js'
 
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
@@ -402,7 +403,7 @@ test('The ComputeContext and callback API', async t => {
   const unit = engine.register('mySlice', class extends Memory {
     initialValue = { name: 'unnamed player', hp: 10 }
 
-    idOf ({ AUTHOR, CHAIN}) {
+    idOf ({ AUTHOR, CHAIN }) {
       t.is(AUTHOR, toHex(_block.key), 'AUTHOR is a hexstring of block.key')
       t.is(CHAIN, toHex(_block.sig), 'CHAIN is a hexstring of block.sig')
       return 0
@@ -418,7 +419,7 @@ test('The ComputeContext and callback API', async t => {
       t.is(typeof ctx.AUTHOR, 'string', 'ctx.AUTHOR = hexstring')
       t.is(typeof ctx.CHAIN, 'string', 'ctx.CHAIN = hexstring')
       t.is(ctx.root, 'mySlice', 'ctx.root = Name of memory unit')
-      t.alike(ctx.payload, { type: 'spawn', name: 'bob'}, 'ctx.payload = user input')
+      t.alike(ctx.payload, { type: 'spawn', name: 'bob' }, 'ctx.payload = user input')
       t.is(typeof ctx.date, 'number', 'ctx.date = Block date')
       // ComputeContext
       //
@@ -505,7 +506,7 @@ test('reducerContext.signal(int, payload)', async t => {
 
 // @deprecated I believe
 skip('Simple stupid slice with crude manual boring garbage collection', async t => {
-  const store = new PicoStore(DB())
+  const store = new Engine(DB())
   store.repo.allowDetached = true
   store.register(CulledClock())
   await store.load()
@@ -587,4 +588,33 @@ skip('Simple stupid slice with crude manual boring garbage collection', async t 
       }
     }
   }
+})
+
+skip('util.ICE: A tripwire object proxy', async t => {
+  const sample = {
+    name: 'Sven',
+    items: [
+      { name: 'torch', attack: 1 },
+      { name: 'rope', def: 0, attr: { magic: 0, fire: -1 } }
+    ],
+    hp: 50,
+    stats: { str: 1, dex: 2, int: 0 },
+    status: 'poisoned'
+  }
+  const tripwired = ice(sample)
+  t.exception(() => { tripwired.status = 'healthy' }, 'Modifying object throws error')
+  try {
+    tripwired.items[0].radius = 999
+    t.fail()
+  } catch (e) {
+    t.pass(e.message)
+  }
+  const sieved = ice(sample, true)
+  sieved.name = 'bjorn'
+  sieved.items.push({ name: 'holy fire sword', attack: 9000 })
+  sieved.status = 'healthy'
+  sieved.items[0].name = 'sling'
+  sieved.key = new Uint8Array(32)
+  sieved.desc = 'a beta tester'
+  console.log(thaw(sieved))
 })
