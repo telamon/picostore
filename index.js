@@ -43,11 +43,23 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       index: (key: u8|string) => Promise<Void>,
       signal: (name: string, payload: any) => void
     }} PostapplyContext
-    @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} Sigint
+    @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
  */
 
 /**
- * A reference-counting decentralized state manager
+ * A slice of the decentralized state.
+ * Create a subclass of Memory to compute your own
+ * distributed collection and define rules to how it should
+ * behave.
+ *
+ * Usage when subclassing:
+ * engine.register('myCollection', class extends Memory {
+ *    idOf ({ CHAIN, AUTHOR }) { return 0 }
+ *
+ *
+ * })
+ *
+ *
  */
 export class Memory {
   initialValue = undefined
@@ -80,6 +92,8 @@ export class Memory {
   get store () { return this.#store }
   get state () { return clone(this.#cache) }
 
+  /// Begin hooks
+
   /** @param {{ CHAIN: Signature, AUTHOR: PublicKey}} ctx
     * @return {Promise<ObjectId>} */
   async idOf ({ CHAIN, AUTHOR }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
@@ -95,6 +109,8 @@ export class Memory {
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
 
   async postapply (value, ctx) { }
+
+  /// End of hooks
 
   async readState (id) {
     if (id instanceof Uint8Array) id = toHex(id)
@@ -134,7 +150,7 @@ export class Memory {
   }
 
   /** @param {DispatchContext} ctx Context containing identified chain tags
-    * @return {Promise<Rejection|Reschedule|Array<Sigint>>} Store alteration result */
+    * @return {Promise<Rejection|Reschedule|Array<SignalInterrupt>>} Store alteration result */
   async _validateAndMutate (ctx) {
     const { block, AUTHOR, CHAIN } = ctx
     // TODO: this is not wrong but CHAIN and AUTHOR is mutually exclusive in picorepo ATM.
@@ -231,7 +247,7 @@ export class Memory {
   }
 
   /**
-   * @param {Sigint} signal an interrupt/signal
+   * @param {SignalInterrupt} signal an interrupt/signal
    * @param {DispatchContext} ctx Dispatch context
    */
   async _trap (signal, ctx) {
@@ -263,14 +279,15 @@ export class Memory {
    * @return {Feed} Feed containing merged blocks
    */
   async createBlock (branch, payload, secret) {
-    branch = await this._formatBlock(branch, payload, secret)
+    branch = await this.formatPatch(branch, payload, secret)
     return await this.store.dispatch(branch, true)
   }
 
   /**
-   * Same as createBlock except doesn't dispatch,
-   * used for test-simulations, use createBlock in production. */
-  async _formatBlock (branch, payload, secret) {
+   * Same as createBlock except does not dispatch.
+   * used for simulating scenarios in tests.
+   * use createBlock in production. */
+  async formatPatch (branch, payload, secret) {
     branch = await this.store.readBranch(branch)
     // TODO: move Date and Collection name to BlockHeaders
     branch.append(encode([this.name, payload, Date.now()]), secret)
@@ -494,9 +511,11 @@ export class Engine {
   /**
    * Mutates the state, if a reload is in progress the dispatch will wait
    * for it to complete.
+   * @param {Feed|Block} patch Incoming blocks with data
+   * @param {boolean} loud Throws errors on invalid blocks
    * @return {Promise<Feed|undefined>} merged blocks
    */
-  async dispatch (patch, loud) {
+  async dispatch (patch, loud = false) {
     return this._lockRun(() => this._dispatch(patch, loud))
   }
 
@@ -530,6 +549,9 @@ export class Engine {
 
     // canMerge?
     if (!local.clone().merge(patch)) {
+      // TODO: minor bug, this error gets thrown when patch === local
+      // correct way is to only throw if local.diff(patch) throws
+      // instead of returning a number.
       if (loud) throw new Error('UnmergablePatch')
       else return
     }
@@ -544,7 +566,7 @@ export class Engine {
       tags.CHAIN = toHex(patch.first.sig)
     }
 
-    const diff = !local.length ? patch.length : local.diff(patch) // WARNING untested internal api.
+    const diff = !local.length ? patch.length : local.diff(patch)
     if (diff < 1) return // Patch contains equal or less blocks than local
 
     let parentBlock = null
@@ -595,9 +617,11 @@ export class Engine {
     // console.log('_processBlock() res', res)
     if (!Array.isArray(res)) { // If not Array<Signal> it's an error
       if (res[SymReject]) {
-        // Loud should be set when locally produced blocks are dispatched.
-        // @ts-ignore
-        if (loud || !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
+        // Loud is set when locally produced blocks are dispatched / Do not allow failing blocks to be created
+        // res.silent is a by-product of old scheme where all MemorySlices always processed all blocks.
+        // this has been changed in 3.x | TODO: remove rejection.silent (no such thing)
+        // if (loud && !res.silent) throw new Error(`InvalidBlock: ${res.message}`)
+        if (loud) throw new Error(`InvalidBlock: ${res.message}`)
       } else if (res[SymPostpone]) {
         console.error('TODO: Implement retries of postponed blocks')
         // TODO: schedule block-id with gc/scheduler to reattempt

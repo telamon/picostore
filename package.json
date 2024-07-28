@@ -9,7 +9,7 @@
     "test": "node test.js",
     "debug": "node inspect test.js",
     "prepublishOnly": "standard && npm test",
-    "types": "tsc --noEmit --allowJs --checkJs --declaration --removeComments --lib es2022,dom --target es2022 --moduleResolution nodenext --module nodenext index.js"
+    "types": "tsc  --emitDeclarationOnly --allowJs --checkJs --declaration --removeComments --lib es2022,dom --target es2022 --moduleResolution nodenext --module nodenext index.js"
   },
   "repository": {
     "type": "git",

@@ -1,4 +1,4 @@
-import { Feed, toHex } from 'picofeed'
+import { Feed, Block, toHex, hexdump, feedFrom } from 'picofeed'
 // TODO:
 // - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)
@@ -38,7 +38,7 @@ export default class MemPool {
       blocks.push(block)
       next = block.parentSig
     }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+    if (blocks.length) segments.push(feedFrom(blocks, true))
 
     // Load forward
     next = forward
@@ -52,7 +52,7 @@ export default class MemPool {
       blocks.push(block)
       next = block.sig
     }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+    if (blocks.length) segments.push(feedFrom(blocks, true))
 
     await Promise.all([
       this.blocks.batch(delBlocks.map(key => ({ type: 'del', key }))),
@@ -63,15 +63,12 @@ export default class MemPool {
 
   async _writeBlock (block) {
     const key = block.sig
-    const buffer = new Uint8Array(32 + block.buffer.length)
-    buffer.set(block.key)
-    buffer.set(block.buffer, 32)
-    await this.blocks.put(key, buffer)
+    await this.blocks.put(key, block.buffer)
   }
 
   async _readBlock (id) {
     const buffer = await this.blocks.get(id).catch(ignore404)
-    if (buffer) return Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
+    if (buffer) return new Block(buffer)
   }
 
   async _hasBlock (id) {

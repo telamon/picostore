@@ -7,7 +7,7 @@ Then it consumes blocks, and maintains a local view
 of the decentralized state.
 
 It wouldn't be wrong to call it an indexer,
-but it would be half of it.
+but it would only be half of it.
 
 Because there's also a garbarge collector.
 

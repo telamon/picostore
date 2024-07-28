@@ -2,6 +2,7 @@ import { test, skip, solo } from 'brittle'
 import { Feed, toU8, cmp } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
 import { createGame } from './example_cgoh.js'
+import { decode } from 'cborg'
 // import { get } from 'piconuro'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
@@ -247,12 +248,12 @@ test('Same block not reduced twice', async t => {
   const unit = store.register('x', makePlainCounter(t))
   await store.load()
   let f = new Feed()
-  f = await unit._formatBlock(f, 1, sk)
-  f = await unit._formatBlock(f, 2, sk)
-  f = await unit._formatBlock(f, 3, sk)
+  f = await unit.formatPatch(f, 1, sk)
+  f = await unit.formatPatch(f, 2, sk)
+  f = await unit.formatPatch(f, 3, sk)
   await store.dispatch(f)
-  f = await unit._formatBlock(f, 4, sk)
-  f = await unit._formatBlock(f, 5, sk)
+  f = await unit.formatPatch(f, 4, sk)
+  f = await unit.formatPatch(f, 5, sk)
   await store.dispatch(f)
   await store.dispatch(f)
   const stored = await store.repo.loadHead(pk)
@@ -271,12 +272,12 @@ test('Same block not reduced twice, given multiple identities', async t => {
 
   await store.load()
   let f = new Feed()
-  f = await unit._formatBlock(f, 1, a)
-  f = await unit._formatBlock(f, 2, b)
-  f = await unit._formatBlock(f, 3, a)
+  f = await unit.formatPatch(f, 1, a)
+  f = await unit.formatPatch(f, 2, b)
+  f = await unit.formatPatch(f, 3, a)
   await store.dispatch(f)
-  f = await unit._formatBlock(f, 4, b)
-  f = await unit._formatBlock(f, 5, a)
+  f = await unit.formatPatch(f, 4, b)
+  f = await unit.formatPatch(f, 5, a)
   await store.dispatch(f)
   await store.dispatch(f)
 
@@ -296,15 +297,15 @@ test('State modifications are mutex locked', async t => {
 
   await store.load()
   const f = new Feed()
-  await unit._formatBlock(f, 1, sk)
-  await unit._formatBlock(f, 2, sk)
-  await unit._formatBlock(f, 3, sk)
+  await unit.formatPatch(f, 1, sk)
+  await unit.formatPatch(f, 2, sk)
+  await unit.formatPatch(f, 3, sk)
   // const p = store.dispatch(f)
-  await unit._formatBlock(f, 4, sk)
-  await unit._formatBlock(f, 5, sk)
+  await unit.formatPatch(f, 4, sk)
+  await unit.formatPatch(f, 5, sk)
   const f2 = f.clone()
-  await unit._formatBlock(f2, 6, sk)
-  await unit._formatBlock(f2, 7, sk)
+  await unit.formatPatch(f2, 6, sk)
+  await unit.formatPatch(f2, 7, sk)
   const tasks = [
     // p,
     store.dispatch(f2),
@@ -332,12 +333,12 @@ test('Filter/Compute does not run on unmutated state', async t => {
   })
   await store.load()
   const f = new Feed()
-  await unit._formatBlock(f, 1, sk)
+  await unit.formatPatch(f, 1, sk)
   await store.dispatch(f, true)
-  await unit._formatBlock(f, 2, sk)
-  await unit._formatBlock(f, 3, sk)
-  await unit._formatBlock(f, 4, sk)
-  await unit._formatBlock(f, 5, sk)
+  await unit.formatPatch(f, 2, sk)
+  await unit.formatPatch(f, 3, sk)
+  await unit.formatPatch(f, 4, sk)
+  await unit.formatPatch(f, 5, sk)
   await store.dispatch(f, true)
   t.is(await unit.readState(0), 5)
 })
@@ -356,63 +357,37 @@ test('Allow multiple feeds from same author (1K)', async t => {
 
   await store.load()
   const a = new Feed()
-  await unit._formatBlock(a, 1, sk)
-  await unit._formatBlock(a, 7, sk)
+  await unit.formatPatch(a, 1, sk)
+  await unit.formatPatch(a, 7, sk)
   await store.dispatch(a, true)
 
   const b = new Feed()
-  await unit._formatBlock(b, 2, sk)
-  await unit._formatBlock(b, 9, sk)
+  await unit.formatPatch(b, 2, sk)
+  await unit.formatPatch(b, 9, sk)
   await store.dispatch(b, true)
 
   // await require('picorepo/dot').dump(store.repo)
   t.alike(await unit.readState(0), [1, 7, 2, 9])
 })
 
-skip('Dispatching blocks one at a time', async t => {
+test('Block cache solves out of order blocks', async t => {
   const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new PicoStore(db)
+  const store = new Engine(DB())
   store.mutexTimeout = 60000000
-  store.register('x', 0,
-    ({ block, state }) => {
-      const n = parseInt(block.body.toString())
-      if (state !== n - 1) return 'InvalidSequence'
-    },
-    ({ block, state }) => parseInt(block.body.toString())
-  )
-  const loud = true
+  const unit = store.register('x', class extends Memory {
+    initialValue = -1
+    idOf () { return 0 } // make global
+    compute (state, { payload, reject }) {
+      // console.log('inc mutation', state, payload)
+      if (payload !== state + 1) return reject('InvalidSequence')
+      return payload
+    }
+  })
   await store.load()
   const f = new Feed()
-  f.append('1', sk)
-  await store.dispatch(f, loud)
-  f.append('2', sk)
-  await store.dispatch(f.slice(-1), loud)
-  f.append('3', sk)
-  await store.dispatch(f.slice(-1), loud)
-  f.append('4', sk)
-  await store.dispatch(f.slice(-1), loud)
-  t.equal(store.state.x, 4)
-  const l = await store.repo.resolveFeed(f.first.sig)
-  t.ok(l.last.sig.equals(f.last.sig), 'repo and store is in sync')
-})
 
-skip('Block cache solves out of order blocks', async t => {
-  const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new PicoStore(db)
-  store.mutexTimeout = 60000000
-  store.register('x', -1,
-    ({ block, state }) => {
-      const n = parseInt(block.body.toString())
-      if (state !== n - 1) return 'InvalidSequence'
-    },
-    ({ block, state }) => parseInt(block.body.toString())
-  )
-  await store.load()
-  const f = new Feed()
   for (let i = 0; i < 10; i++) {
-    f.append(`${i}`, sk)
+    await unit.formatPatch(f, i, sk)
   }
 
   const slice0 = f.slice(0, 1)
@@ -423,39 +398,38 @@ skip('Block cache solves out of order blocks', async t => {
   const slice7 = f.slice(7, 8)
   const slice89 = f.slice(8, 10)
 
-  let m = await store.dispatch(slice0)
+  let m = await store.dispatch(slice0, true)
   t.ok(m.length)
-  m = await store.dispatch(slice2)
-  t.notOk(m.length)
-  m = await store.dispatch(slice1) // Block 1
-  t.ok(m.length, 'Blocks recovered and merged')
-  t.equal(store.state.x, 2)
-  t.ok(m.patch, 'patch exported')
-  t.equal(m.patch.length, 2)
+  m = await store.dispatch(slice2, true) // Does not throw, because slice 2 ends up in cache
+  t.not(m, 'returns undefined')
+  m = await store.dispatch(slice1, true) // Block 1
+  t.ok(m.length, 'Blocks seem recovered and merged')
+  t.is(await unit.readState(0), 2, 'Value is correct')
+  t.is(m.length, 2, 'patch exported')
 
   // Next, create a gap [4,5,6, empty, 8,9]
-  m = await store.dispatch(slice456) // Blocks 4,5,6
-  t.notOk(m.length, 'blocks cached')
+  m = await store.dispatch(slice456, true) // Blocks 4,5,6
+  t.not(m, 'blocks cached')
 
-  m = await store.dispatch(slice89) // Blocks 8,9
-  t.notOk(m.length, 'blocks cached')
+  m = await store.dispatch(slice89, true) // Blocks 8,9
+  t.not(m, 'blocks cached')
 
-  m = await store.dispatch(slice7) // missing Block 7
-  t.notOk(m.length, 'blocks cached')
+  m = await store.dispatch(slice7, true) // missing Block 7
+  t.not(m, 'blocks cached')
 
   // Check if cache merged the gap
-  const [cached] = await store.cache.pop(slice3.first.parentSig, slice3.first.sig)
-  t.equals(cached.first.body.toString(), slice456.first.body.toString(), 'poped starts at 4')
-  t.equals(cached.last.body.toString(), slice89.last.body.toString(), 'poped ends at 9')
+  const [cached] = await store.cache.pop(slice3.first.psig, slice3.first.sig)
+  t.alike(decode(cached.first.body), decode(slice456.first.body), 'poped starts at 4')
+  t.alike(decode(cached.last.body), decode(slice89.last.body), 'poped ends at 9')
 
   // Last test
   m = await store.dispatch(cached)
-  t.notOk(m.length, 'blocks re-cached')
-  t.equal(store.state.x, 2)
+  t.not(m, 'blocks re-cached')
+  t.is(await unit.readState(0), 2)
 
   m = await store.dispatch(slice3)
   t.ok(m.length, 'blocks merged')
-  t.equal(store.state.x, 9)
+  t.is(await unit.readState(0), 9, 'cache flushed all blocks merged')
 })
 
 
@@ -502,35 +476,8 @@ skip('Parent block provided to validator', async t => {
   await store.reload()
 })
 
-// @deprecated, slices are async now, so root state dosen't have to be available +readonly anyway
-skip('Root state available in slices', async t => {
-  const { sk } = Feed.signPair()
-  const db = DB()
-  const store = new PicoStore(db)
-
-  store.register('x', 5, () => true, () => 0) // dummy store
-  store.register('y', 7,
-    ({ root }) => {
-      t.ok(root)
-      t.equal(root.x, 5)
-      t.equal(root.y, 7)
-    },
-    ({ root }) => {
-      t.ok(root)
-      t.equal(root.x, 5)
-      t.equal(root.y, 7)
-      return 8
-    }
-  )
-  await store.load()
-  const f = new Feed()
-  f.append('0', sk)
-  await store.dispatch(f, true)
-  t.end()
-})
-
 // TODO: port to V3, game-of-bumps informally tests signals, but clean signal API test is good
-skip('reducerContext.signal(int, payload)', async t => {
+test('reducerContext.signal(int, payload)', async t => {
   /**
    * Each slices provides their own registers, a memory region
    * that they own and maintain.
@@ -546,71 +493,52 @@ skip('reducerContext.signal(int, payload)', async t => {
    *   register observers are notified.
    */
   // The Problem:
-  const db = DB()
-  const store = new PicoStore(db)
+  const store = new Engine(DB())
   const INT_RST = 0 // 'reset'-interrupt
   let resetFired = 0
   // X.slice is a incremental counter
-  store.register({
-    name: 'x',
-    initialValue: 0,
-    filter: ({ block, state }) => {
-      return parseInt(block.body.toString()) > state
-        ? false // accept
-        : 'XValueTooLow' // reject
-    },
-    reducer: ({ block, state }) => parseInt(block.body.toString()),
-    trap: ({ code, payload, state, root }) => {
-      if (code !== INT_RST) return // undefined return means trap not triggered.
-      t.equal(code, INT_RST)
-      t.equal(payload, 'hit-the-brakes!', 'playload visible')
-      t.ok(root)
+  const unitX = store.register('x', class extends Memory {
+    initialValue = 0
+    idOf() { return 0 }
+    /** @override */
+    compute (value, { payload, reject }) {
+      if (payload <= value) return reject('value too low')
+      return payload
+    }
+
+    /** @override */
+    async postapply (value, { AUTHOR , signal, index }) { // TODO: document/test index
+      if (!(value % 2)) signal('even-value', value)
+      // await index(AUTHOR, id) // PHASE: on-apply
+    }
+  })
+  const unitY = store.register('y', class extends Memory {
+    initialValue = 0
+    idOf() { return 0 }
+    compute (_, { reject }) { return reject('Y listens only to signals') }
+
+    async trap (signalName, signalPayload, mutate) {
+      t.is(signalName, 'even-value')
       resetFired++
-      return 0
+      /** mutate(objId, currentValue => (currentValue + 1)) */
+      await mutate(0, () => signalPayload)
     }
   })
-  // Y.slice computes (x^2) and signals reset at a threshhold
-  function compute (x) { return x * x }
-  store.register({
-    name: 'y',
-    initialValue: 0,
-    filter: ({ block, state }) => {
-      return compute(parseInt(block.body.toString())) > state
-        ? false // accept
-        : 'YValueTooLow' // reject
-    },
-    reducer: ({ block, state, root, signal }) => {
-      const y = compute(parseInt(block.body.toString()))
-      if (y > root.x * 5) { // Too fast, reset throttle
-        t.equal(typeof signal, 'function', 'signal method provided in context')
-        signal(INT_RST, 'hit-the-brakes!')
-        return 0
-      } else return y // accellerate as usual
-    }
-  })
+
   await store.load()
   const { sk } = Feed.signPair()
   const f = new Feed()
-  f.append('1', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 0, 'Signal not yet triggered')
-  f.append('2', sk)
-  f.append('3', sk)
-  f.append('4', sk)
-  f.append('5', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 0, 'not yet')
-  f.append('6', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 1, 'Fired')
-  t.equal(store.state.x, 0)
-  t.equal(store.state.y, 0)
-  f.append('3', sk)
-  f.append('4', sk)
-  await store.dispatch(f, true)
-  t.equal(resetFired, 1, 'reset still only once')
-  t.equal(store.state.x, 4, 'Counter works after reset')
-  t.equal(store.state.y, 16)
+  await unitX.createBlock(f, 1, sk)
+  // await store.dispatch(f, true) trigger to minor bug
+  t.is(resetFired, 0, 'Signal not yet triggered')
+  await unitX.createBlock(f, 2, sk)
+  t.is(resetFired, 1, 'trapped once')
+  await unitX.createBlock(f, 3, sk)
+  await unitX.createBlock(f, 4, sk)
+  t.is(resetFired, 2, 'trapped twice')
+
+  t.is(await unitX.readState(0), 4, 'X = 4')
+  t.is(await unitY.readState(0), 4, 'Y = 4')
 })
 
 skip('Simple stupid slice with crude manual boring garbage collection', async t => {
