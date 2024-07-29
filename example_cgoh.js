@@ -38,7 +38,6 @@ export class Profiles extends DiffMemory {
 
   expiresAt (value) {
     const { _created, hp } = value
-    debugger
     return _created + hp * (20 * 60000) // All creatures die without bumps
   }
 

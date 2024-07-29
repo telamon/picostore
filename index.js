@@ -1,5 +1,5 @@
 import { Repo } from 'picorepo'
-import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
+import { Feed, getPublicKey, toHex, toU8, s2b, cmp, feedFrom, hexdump } from 'picofeed'
 // import { init, get } from 'piconuro'
 import { Mempool } from './mempool.js'
 import { Scheduler } from './scheduler.js'
@@ -10,6 +10,8 @@ const SymReject = Symbol.for('PiC0VM::reject')
 const SymSignal = Symbol.for('PiC0VM::signal')
 
 /** @typedef {import('abstract-level').AbstractLevel} AbstractLevel */
+/** @typedef {import('picorepo').BinaryLevel} BinaryLevel
+/** @typedef {import('picorepo').MergeStrategy} MergeStrategy
 /** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -387,9 +389,17 @@ export class Store {
   /** @type {Record<string, Memory>} */
   roots = {} // StateRoots
   _loaded = false
-  _tap = null // global signal trap
+  #tap = null // global signal trap
   mutexTimeout = 5000
-  _onUnlock = []
+  /** @type {function[]} */
+  _onUnlock = [] // TODO: this mechanism is unused atm
+  #eventBuffer = []
+  /** @type {Mempool} */
+  cache = null
+  /** @type {Scheduler} */
+  _gc = null
+  /** @type {Repo} */
+  repo = null
   stats = {
     blocksIn: 0,
     blocksOut: 0,
@@ -399,15 +409,14 @@ export class Store {
   }
 
   /**
-   * @typedef {import('picorepo').BinaryLevel} BinaryLevel
-   * @typedef {import('picorepo').MergeStrategy} MergeStrategy
    * @typedef {{
    *  allowDetached?: boolean,
    *  strategy?: MergeStrategy,
    *  mempoolDB?: BinaryLevel
    * }} StoreOptions
    *
-   * @param {BinaryLevel} db Database to use for persistance
+   * @constructor
+   * @param {BinaryLevel|Repo} db Database to use for persistance
    * @param {StoreOptions} options
    */
   constructor (db, options = {}) {
@@ -436,18 +445,24 @@ export class Store {
     return this.roots[name]
   }
 
-  #tap = null
   _notify (event, payload) {
-    // console.info('event:', event, payload.root)
-    if (typeof this.#tap === 'function') this.#tap(event, payload)
+    // console.info('event:', event, payload.root || payload.patch?.length)
+    this.#eventBuffer.push({ event, payload })
+  }
+
+  #flush_notifications () {
+    const events = this.#eventBuffer
+    this.#eventBuffer = []
+    console.info('flush-events:', events.map(({ event, payload }) => [event, payload.root || payload.patch?.length]))
+    if (typeof this.#tap === 'function') setTimeout(() => this.#tap(events))
   }
 
   /**
    * Tap into internal eventlog, useful for debugging.
-   * @type {(cb: (event:string, payload: any) => void) => void}
+   * @type {(cb: (events: { event:string, payload: any}[]) => void) => void}
    */
   tap (cb) {
-    if (typeof cb !== 'function') throw new Error('Expected callback to be function')
+    if (typeof cb !== 'function' && cb !== null) throw new Error('Expected callback to be function|null')
     this.#tap = cb
   }
 
@@ -523,6 +538,7 @@ export class Store {
         clearTimeout(timerId)
         let action = null
         while ((action = this._onUnlock.shift())) action()
+        this.#flush_notifications()
       }
     }).catch(reject)
     return p
@@ -553,7 +569,7 @@ export class Store {
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     // align + grow blockroots
-    patch = Feed.from(patch)
+    patch = feedFrom(patch)
     let local = null // Target branch to merge to
     try {
       const sig = patch.first.genesis
@@ -578,11 +594,8 @@ export class Store {
     }
 
     // canMerge?
-    if (!local.clone().merge(patch)) {
-      // TODO: minor bug, this error gets thrown when patch === local
-      // correct way is to only throw if local.diff(patch) throws
-      // instead of returning a number.
-      if (loud) throw new Error('UnmergablePatch')
+    try { local.diff(patch) } catch (err) {
+      if (loud) throw err
       else return
     }
 
@@ -632,7 +645,9 @@ export class Store {
       parentBlock = block
       merged.push(block)
     }
-    if (merged.length) return Feed.from(merged)
+    const appliedPatch = merged.length && feedFrom(merged, true) // noVerify
+    if (appliedPatch) this._notify('patch-merged', { patch: appliedPatch })
+    return appliedPatch
   }
 
   /**

@@ -2,7 +2,7 @@ import { Block, feedFrom, Feed } from 'picofeed'
 // TODO:
 // - choose eviction algo (avoid ddos)
 export class Mempool {
-  /** @typedef {import('AbstractLevel').AbstractLevel<any,Uint8Array,Uint8Array>} BinaryLevel */
+  /** @typedef {import('abstract-level').AbstractLevel<any,Uint8Array,Uint8Array>} BinaryLevel */
   /** @typedef {import('picofeed').SignatureBin} SignatureBin */
   /** @type {BinaryLevel} */
   blocks = null

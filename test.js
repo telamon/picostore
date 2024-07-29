@@ -8,7 +8,7 @@ import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
 import { Store, DiffMemory, Memory } from './index.js'
 import { ice, thaw } from './ice.js'
-
+Feed.__vctr = 0
 const DB = () => new MemoryLevel({
   valueEncoding: 'view',
   keyEncoding: 'view'
@@ -646,4 +646,8 @@ test('MemorySlices can be subscribed', async t => {
   unsub1()
   await unit.mutate(feedB, value => ({ ...value, ping: 5 + value.ping }), B.sk)
   t.is(observations, 6)
+})
+
+test('test suite verifcation counts', async () => {
+  console.log('block.verify() was invoked n-times:', Feed.__vctr)
 })
