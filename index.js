@@ -1,5 +1,5 @@
 import { Repo } from 'picorepo'
-import { Feed, getPublicKey, toHex, toU8, s2b, cmp, feedFrom, hexdump } from 'picofeed'
+import { Feed, getPublicKey, toHex, toU8, s2b, cmp, feedFrom } from 'picofeed'
 // import { init, get } from 'piconuro'
 import { Mempool } from './mempool.js'
 import { Scheduler } from './scheduler.js'

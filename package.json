@@ -1,6 +1,6 @@
 {
   "name": "@telamon/picostore",
-  "version": "3.0.0-rc0",
+  "version": "3.0.0-rc1",
   "description": "The block engine and indexer of picofeed",
   "main": "index.js",
   "type": "module",
