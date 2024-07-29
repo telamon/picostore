@@ -16,7 +16,7 @@ Because there's also a garbarge collector.
 ## Use
 
 ```bash
-$ npm i @picoengine browser-level memory-level
+$ npm i @telamon/picostore browser-level memory-level
 ```
 
 Starter example using bundled DiffMemory:
@@ -24,7 +24,7 @@ Starter example using bundled DiffMemory:
 ```js
 import { Feed } from 'picofeed'
 import { MemoryLevel } from 'memory-level'
-import { Engine, DiffMemory } from 'picoengine'
+import { Store, DiffMemory } from 'picoengine'
 
 // First an identity and a feed/chain
 const { pk: pubkey, sk: secret } = Feed.signPair()
@@ -32,13 +32,13 @@ const feed = new Feed()
 
 // Create a database and pass it to the engine
 const db = new MemoryLevel('app', { keyEncoding: 'view', valueEncoding: 'view' })
-const engine = new Engine(db)
+const store = new Store(db)
 
 // Register a collection and it's controller
 const collection = engine.register('peers', DiffMemory)
 
 // Restore state from previous boot/pageload
-await engine.load()
+await store.load()
 
 
 // Eventually you'll want to create your own subclass of `Memory`
@@ -95,9 +95,9 @@ effort and time.
 ## Changelog
 
 ### [3.0.0] - 2024-07-29
-
+- Holding off package rename Engine ("pico-engine" is taken, pengine?)
 - Migrated to Picofeed 8.x
-- Completeley reworked stores into 'Memory'
+- Completeley reworked slices into 'Memory'
 - combined `filter()`, `rreduce()` callbacks into `compute()`
 - Garbage collector now uses Reference counting.
 - Dropped required `sweep()` callback, possible to override default if needed.

@@ -8,8 +8,8 @@
     "lint": "standard --fix",
     "test": "node test.js",
     "debug": "node inspect test.js",
-    "prepublishOnly": "standard && npm test",
-    "types": "tsc  --emitDeclarationOnly --allowJs --skipLibCheck --checkJs --declaration --removeComments --lib es2022 --target es2022 --moduleResolution nodenext --module nodenext index.js"
+    "prepublishOnly": "standard && npm test && npm run types",
+    "types": "tsc --skipLibCheck --emitDeclarationOnly --allowJs --checkJs --declaration --removeComments --lib es2022 --target es2022 --moduleResolution nodenext --module nodenext index.js"
   },
   "types": "index.d.ts",
   "repository": {
@@ -29,13 +29,12 @@
     "cborg": "^4.2.3",
     "memory-level": "^1.0.0",
     "picofeed": "^8.0.3",
-    "piconuro": "^1.0.1",
-    "picorepo": "^2.2.2",
+    "picorepo": "^2.2.3",
     "standard": "^17.1.0"
   },
   "peerDependencies": {
     "cborg": "^4.0.5",
     "picofeed": "^8.0.3",
-    "picorepo": "^2.2.2"
+    "picorepo": "^2.2.3"
   }
 }

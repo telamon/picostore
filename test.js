@@ -6,7 +6,7 @@ import { decode } from 'cborg'
 // import { get } from 'piconuro'
 import { inspect } from 'picorepo/dot.js'
 import { writeFileSync } from 'node:fs'
-import { Engine, DiffMemory, Memory } from './index.js'
+import { Store, DiffMemory, Memory } from './index.js'
 import { ice, thaw } from './ice.js'
 
 const DB = () => new MemoryLevel({
@@ -27,7 +27,7 @@ const DB = () => new MemoryLevel({
 test('PicoStore 3.x', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   // API Change twice
   const collection = store.register('counter', class CRDTCounter extends DiffMemory {
     initialValue = { x: 0 }
@@ -64,7 +64,7 @@ test('PicoStore 3.x', async t => {
 
 test('DVM3.x Conways Game Of Bumps', async t => {
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   const [profiles, bumps] = createGame(store)
   await store.load()
   const A = Feed.signPair()
@@ -93,7 +93,7 @@ test('DVM3.x Conways Game Of Bumps', async t => {
 })
 
 test('PicoStore 2.x/ counters scenario', async t => {
-  const store = new Engine(DB())
+  const store = new Store(DB())
 
   class Counter extends Memory {
     initialValue = 5
@@ -115,7 +115,7 @@ test('PicoStore 2.x/ counters scenario', async t => {
   t.is(await colCounter.readState(0), 7)
 
   // Simulate network connection between two stores
-  const store2 = new Engine(DB())
+  const store2 = new Store(DB())
   const counter2 = store2.register('counter', Counter)
   await store2.load()
   t.is(await counter2.readState(0), 5)
@@ -143,7 +143,7 @@ test('PicoStore 2.x/ counters scenario', async t => {
 test('Buffers should not be lost during state reload', async t => {
   const { pk, sk } = Feed.signPair()
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   const profiles1 = store.register('pk', DiffMemory)
   await store.load()
 
@@ -158,7 +158,7 @@ test('Buffers should not be lost during state reload', async t => {
   t.ok(cmp(toU8(pk), o.prop))
 
   // Open second store forcing it to load cached state
-  const s2 = new Engine(db)
+  const s2 = new Store(db)
   const profiles2 = s2.register('pk', DiffMemory)
   await s2.load()
   o = await profiles2.readState(pk)
@@ -170,7 +170,7 @@ test('Buffers should not be lost during state reload', async t => {
 test('Validation errors cause createBlock() to fail', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   class DummyCounter extends DiffMemory {
     initialValue = { n: 0 }
     idOf () { return 0 }
@@ -205,7 +205,7 @@ const makePlainCounter = t => class extends Memory {
 // Important test
 test('Same block not reduced twice', async t => {
   const { pk, sk } = Feed.signPair()
-  const store = new Engine(DB())
+  const store = new Store(DB())
 
   const unit = store.register('x', makePlainCounter(t))
   await store.load()
@@ -229,7 +229,7 @@ test('Same block not reduced twice, given multiple identities', async t => {
   const b = Feed.signPair().sk
 
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   const unit = store.register('x', makePlainCounter(t))
 
   await store.load()
@@ -253,7 +253,7 @@ test('State modifications are mutex locked', async t => {
   const { pk, sk } = Feed.signPair()
 
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
 
   const unit = store.register('x', makePlainCounter(t))
 
@@ -284,7 +284,7 @@ test('State modifications are mutex locked', async t => {
 test('Filter/Compute does not run on unmutated state', async t => {
   const { sk } = Feed.signPair()
   const db = DB()
-  const store = new Engine(db)
+  const store = new Store(db)
   const unit = store.register('x', class extends Memory {
     initialValue = 0
     async idOf () { return 0 }
@@ -307,7 +307,7 @@ test('Filter/Compute does not run on unmutated state', async t => {
 
 test('Allow multiple feeds from same author (1K)', async t => {
   const { sk } = Feed.signPair()
-  const store = new Engine(DB())
+  const store = new Store(DB())
   store.repo.allowDetached = true // TODO: make default behaviour
   const unit = store.register('x', class extends Memory {
     idOf () { return 0 } // Single global register
@@ -334,7 +334,7 @@ test('Allow multiple feeds from same author (1K)', async t => {
 
 test('Block cache solves out of order blocks', async t => {
   const { sk } = Feed.signPair()
-  const store = new Engine(DB())
+  const store = new Store(DB())
   store.mutexTimeout = 60000000
   const unit = store.register('x', class extends Memory {
     initialValue = -1
@@ -398,7 +398,7 @@ test('Block cache solves out of order blocks', async t => {
 // Dispatch < Compute < Postapply
 test('The ComputeContext and callback API', async t => {
   const { sk } = Feed.signPair()
-  const engine = new Engine(DB())
+  const engine = new Store(DB())
   let _block = null
   const unit = engine.register('mySlice', class extends Memory {
     initialValue = { name: 'unnamed player', hp: 10 }
@@ -461,7 +461,7 @@ test('reducerContext.signal(int, payload)', async t => {
    *   register observers are notified.
    */
   // The Problem:
-  const store = new Engine(DB())
+  const store = new Store(DB())
   let resetFired = 0
   // X.slice is a incremental counter
   const unitX = store.register('x', class extends Memory {
@@ -506,7 +506,7 @@ test('reducerContext.signal(int, payload)', async t => {
 
 // @deprecated I believe
 skip('Simple stupid slice with crude manual boring garbage collection', async t => {
-  const store = new Engine(DB())
+  const store = new Store(DB())
   store.repo.allowDetached = true
   store.register(CulledClock())
   await store.load()
@@ -624,7 +624,7 @@ skip('util.ICE: A tripwire object proxy', async t => {
  * atm we support old picostore2.x api
  */
 test('MemorySlices can be subscribed', async t => {
-  const eng = new Engine(DB())
+  const eng = new Store(DB())
   /** @type {DiffMemory} */
   const unit = eng.register('peers', class extends DiffMemory {
     initialValue = { name: 'bob', ping: 0 }

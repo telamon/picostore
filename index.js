@@ -1,8 +1,8 @@
 import { Repo } from 'picorepo'
 import { Feed, getPublicKey, toHex, toU8, s2b, cmp } from 'picofeed'
 // import { init, get } from 'piconuro'
-import Mempool from './mempool.js'
-import Scheduler from './scheduler.js' // TODO: rename to scheduler?
+import { Mempool } from './mempool.js'
+import { Scheduler } from './scheduler.js'
 import { encode, decode } from 'cborg'
 
 const SymPostpone = Symbol.for('PiC0VM::postpone')
@@ -41,6 +41,7 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       index: (key: u8|string) => void,
       signal: (name: string, payload: any) => void
     }} ComputeContext
+    @typedef {(value: any, context: DispatchContext) => Promise<Rejection|Reschedule|any>} ComputeFunction
 
     @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
  */
@@ -61,7 +62,7 @@ export class Memory {
   #observers = []
 
   /**
-   * @param {Engine} store
+   * @param {Store} store
    * @param {string} name
    */
   constructor (store, name) {
@@ -80,7 +81,7 @@ export class Memory {
     this.#head = undefined
   }
 
-  /** @return {Engine} */
+  /** @return {Store} */
   get store () { return this.#store }
   get state () { return tripWire(this.#cache) }
 
@@ -95,9 +96,7 @@ export class Memory {
    *  @return {Promise<number|Infinity>} */
   async expiresAt (value, latch) { return Infinity }
 
-  /** @param {any} value Current state
-    * @param {ComputeContext} ctx
-    * @return {Promise<Rejection|Reschedule|any>} The new value */
+  /** @type {ComputeFunction} */
   async compute (value, ctx) { throw new Error('Memory.compute(ctx: ComputeContext) => draft; must be implemented by subclass') }
 
   /// End of hooks
@@ -384,7 +383,7 @@ function mkRefKey (blockRoot, stateRoot, objId = null) {
   return k
 }
 
-export class Engine {
+export class Store {
   /** @type {Record<string, Memory>} */
   roots = {} // StateRoots
   _loaded = false
@@ -400,20 +399,22 @@ export class Engine {
   }
 
   /**
+   * @typedef {import('picorepo').BinaryLevel} BinaryLevel
+   * @typedef {import('picorepo').MergeStrategy} MergeStrategy
    * @typedef {{
-   *  allowDetached: boolean,
-   *  strategy?: import('picorepo').MergeStrategy,
-   *  mempoolDB?: AbstractLevel
-   * }} EngineOptions
+   *  allowDetached?: boolean,
+   *  strategy?: MergeStrategy,
+   *  mempoolDB?: BinaryLevel
+   * }} StoreOptions
    *
-   * @param {AbstractLevel} db Database to use for persistance
-   * @param {EngineOptions} options
+   * @param {BinaryLevel} db Database to use for persistance
+   * @param {StoreOptions} options
    */
   constructor (db, options = {}) {
     this.repo = Repo.isRepo(db) ? db : new Repo(db)
     this.cache = new Mempool(options?.mempoolDB || this.repo._db)
     this._gc = new Scheduler(this.repo)
-    this._strategy = options?.strategy || (() => {})
+    this._strategy = /** @type {MergeStrategy} */ options?.strategy || (() => false)
     this.repo.allowDetached = options?.allowDetached || false
     /** @type {import('abstract-level').AbstractSublevel} */
     this._refReg = this.repo._db.sublevel('REFs', {
@@ -424,7 +425,6 @@ export class Engine {
 
   /**
    * Initializes a managed decentralized memory area
-   * @template T extends Memory
    * @param {string} name - The name of the collection
    * @param {new (...args: any[]) => Memory} MemoryClass - Constructor of Memory or subclass
    * @return {Memory} - An instance of the MemorySubClass

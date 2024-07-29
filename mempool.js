@@ -1,21 +1,31 @@
-import { Block, feedFrom } from 'picofeed'
+import { Block, feedFrom, Feed } from 'picofeed'
 // TODO:
-// - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)
-export default class MemPool {
+export class Mempool {
+  /** @typedef {import('AbstractLevel').AbstractLevel<any,Uint8Array,Uint8Array>} BinaryLevel */
+  /** @typedef {import('picofeed').SignatureBin} SignatureBin */
+  /** @type {BinaryLevel} */
+  blocks = null
+  /** @type {BinaryLevel} */
+  refs = null
+
+  /** @constructor
+    * @param {BinaryLevel} db */
   constructor (db) {
     this.blocks = db.sublevel('b', {
       keyEncoding: 'view',
       valueEncoding: 'view'
     })
+
     this.refs = db.sublevel('r', {
       keyEncoding: 'view',
       valueEncoding: 'view'
     })
   }
 
+  /** @param {Feed} feed */
   async push (feed) {
-    if (feed.first.isGenesis) throw new Error('GenesisRefused')
+    if (feed.first.genesis) throw new Error('GenesisRefused')
     for (const block of feed.blocks) {
       // Store forward ref
       await this.refs.put(block.psig, block.sig)
@@ -23,6 +33,11 @@ export default class MemPool {
     }
   }
 
+  /**
+   * @param {SignatureBin} backward
+   * @param {SignatureBin} forward
+   * @return {Promise<Feed[]>}
+   */
   async pop (backward, forward) {
     const delRefs = []
     const delBlocks = []
@@ -61,16 +76,19 @@ export default class MemPool {
     return segments
   }
 
+  /** @type {(block: Block) => Promise<void>} */
   async _writeBlock (block) {
     const key = block.sig
     await this.blocks.put(key, block.buffer)
   }
 
+  /** @type {(id: SignatureBin) => Promise<Block>} */
   async _readBlock (id) {
     const buffer = await this.blocks.get(id).catch(ignore404)
     if (buffer) return new Block(buffer)
   }
 
+  /** @type {(id: SignatureBin) => Promise<boolean>} */
   async _hasBlock (id) {
     return !!(await this._readBlock(id))
   }

@@ -4,7 +4,7 @@ import { encode, decode } from 'cborg'
 const D = debug('pico:gc')
 const REG_TIMER = 'TIMR'
 
-export default class StatelessScheduler { // What's left is the scheduler
+export class Scheduler { // What's left is the scheduler
   intervalId = null
   constructor (repo) {
     this.repo = repo
