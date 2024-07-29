@@ -3,6 +3,14 @@
   "version": "3.0.1",
   "description": "The block engine and indexer of picofeed",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "scheduler.js",
+    "scheduler.d.ts",
+    "mempool.js",
+    "mempool.d.ts"
+  ],
   "type": "module",
   "scripts": {
     "lint": "standard --fix",
