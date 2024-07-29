@@ -393,6 +393,7 @@ export class Store {
   mutexTimeout = 5000
   /** @type {function[]} */
   _onUnlock = [] // TODO: this mechanism is unused atm
+  closed = false
   #eventBuffer = []
   /** @type {Mempool} */
   cache = null
@@ -515,7 +516,8 @@ export class Store {
       : await this.repo.resolveFeed(branch) // Assume blockid
   }
 
-  async _lockRun (asyncCallback) {
+  async _lockRun (asyncCallback, ignoreClosed = false) {
+    if (this.closed && !ignoreClosed) throw new Error('StoreClosed')
     // WebLocks API trades-off the result of locked context runs.
     // this is a workaround for that.
     const [p, resolve, reject] = unpromise()
@@ -769,6 +771,14 @@ export class Store {
     const exp = await root.expiresAt(value, latch) // latchpatch
     if (!Number.isFinite(exp) && exp !== Infinity) throw new Error(`Expected ${rootName}.expiresAt() to return number|Infinity, got ${exp}`)
     return exp
+  }
+
+  async close () {
+    this.gcStop()
+    this.closed = true
+    return this._lockRun(async () => {
+      await this.repo._db.close()
+    }, true)
   }
 }
 
