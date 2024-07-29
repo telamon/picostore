@@ -453,7 +453,7 @@ export class Store {
   #flush_notifications () {
     const events = this.#eventBuffer
     this.#eventBuffer = []
-    console.info('flush-events:', events.map(({ event, payload }) => [event, payload.root || payload.patch?.length]))
+    // console.info('flush-events:', events.map(({ event, payload }) => [event, payload.root || payload.patch?.length]))
     if (typeof this.#tap === 'function') setTimeout(() => this.#tap(events))
   }
 
@@ -562,6 +562,14 @@ export class Store {
    * @return {Promise<Feed|undefined>} merged blocks
    */
   async dispatch (patch, loud = false) {
+    patch = feedFrom(patch)
+    // Optimizatiion, do not request write lock when all blocks in patch exists.
+    let hasNew = false
+    for (const block of patch.blocks) {
+      hasNew = !await this.repo._hasBlock(block.sig) // TODO: optimize and unprefix
+      if (hasNew) break
+    }
+    if (!hasNew) return
     return this._lockRun(() => this._dispatch(patch, loud))
   }
 
@@ -569,7 +577,6 @@ export class Store {
   async _dispatch (patch, loud = false) {
     if (!this._loaded) throw Error('Store not ready, call load()')
     // align + grow blockroots
-    patch = feedFrom(patch)
     let local = null // Target branch to merge to
     try {
       const sig = patch.first.genesis
