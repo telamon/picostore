@@ -9,6 +9,7 @@ const SymPostpone = Symbol.for('PiC0VM::postpone')
 const SymReject = Symbol.for('PiC0VM::reject')
 const SymSignal = Symbol.for('PiC0VM::signal')
 
+/** @typedef {import('abstract-level').AbstractLevel} AbstractLevel */
 /** @typedef {Uint8Array} u8 */
 /** @typedef {string} hexstring */
 /** @typedef {hexstring} Author */
@@ -398,11 +399,22 @@ export class Engine {
     date: Date.now()
   }
 
-  constructor (db, mergeStrategy) {
+  /**
+   * @typedef {{
+   *  allowDetached: boolean,
+   *  strategy?: import('picorepo').MergeStrategy,
+   *  mempoolDB?: AbstractLevel
+   * }} EngineOptions
+   *
+   * @param {AbstractLevel} db Database to use for persistance
+   * @param {EngineOptions} options
+   */
+  constructor (db, options = {}) {
     this.repo = Repo.isRepo(db) ? db : new Repo(db)
-    this.cache = new Mempool(this.repo._db)
+    this.cache = new Mempool(options?.mempoolDB || this.repo._db)
     this._gc = new Scheduler(this.repo)
-    this._strategy = mergeStrategy || (() => {})
+    this._strategy = options?.strategy || (() => {})
+    this.repo.allowDetached = options?.allowDetached || false
     /** @type {import('abstract-level').AbstractSublevel} */
     this._refReg = this.repo._db.sublevel('REFs', {
       keyEncoding: 'view',

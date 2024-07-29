@@ -16,90 +16,54 @@ Because there's also a garbarge collector.
 ## Use
 
 ```bash
-$ npm i @telamon/picostore browser-level
+$ npm i @picoengine browser-level memory-level
 ```
+
+Starter example using bundled DiffMemory:
 
 ```js
-// Initialize a new store using
-const db = ... // level-dbs-like-interface
-const store = new PicoStore(db)
+import { Feed } from 'picofeed'
+import { MemoryLevel } from 'memory-level'
+import { Engine, DiffMemory } from 'picoengine'
 
-// Define a block-validator function,
-// that checks if a block can be applied given content, author / something.
-const canMutate = ({ state, block }) => {
-  // Extract value from block
-  const n = JSON.parse(block.body)
+// First an identity and a feed/chain
+const { pk: pubkey, sk: secret } = Feed.signPair()
+const feed = new Feed()
 
-  // New value is valid if higher than previous value
-  if (n <= state) return true
-}
+// Create a database and pass it to the engine
+const db = new MemoryLevel('app', { keyEncoding: 'view', valueEncoding: 'view' })
+const engine = new Engine(db)
 
-// Define a state reducer
-const reducer = ({ state, block }) => {
-  // returns new state of counter
-  return JSON.parse(block.body)
-}
+// Register a collection and it's controller
+const collection = engine.register('peers', DiffMemory)
 
-// Registers the counter store with 5 being initial state.
-store.register('counter', 5, canMutate, reducer)
-await store.load()
+// Restore state from previous boot/pageload
+await engine.load()
 
-console.log(store.state.counter) // => 5
 
-// Mutate the state by creating a new feed and dispatching it.
-const { sk } = Feed.signPair()
-const mutations = new Feed()
+// Eventually you'll want to create your own subclass of `Memory`
+// but the bundled `DiffMemory`-class is a good starting point
+// because it provides the function `mutate()`
 
-// append new value as a transaction
-mutations.append(JSON.stringify(7), sk)
+await collection.mutate(feed, currentValue => {
+  return {
+    name: 'Bob',
+    location: 'bahamas',
+    occupation: 'fishwarrior'
+  }
+}, secret)
 
-// dispatch the transactions
-let changed = await store.dispatch(mutations)
+await collection.readState(pubkey) // => { name: 'Bob', ...}
 
-// dispatch returns a list of registers that were modified by the feed
-console.log(changed) // => ['counter']
-
-// state is mutated.
-console.log(store.state.counter) // => 7
+// TODO: transmit feed.buffer to a buddy
+// and your local state will be replicated
+// on their end
+debugger
 ```
 
-Using with Svelte:
-```js
-import { readable } from 'svelte/stores'
-import PicoStore from 'picostore'
+Please keep an eye on the [picostack](https://github.com/telamon/picostack) repo,
+there will be more complete examples and starting points.
 
-// Initialize a store maintaining "posts"
-const store = new PicoStore(...)
-store.register('posts', ...)
-
-// Voilá a Svelte readable store
-const posts = readable(store.state.posts, set => store.on('posts', set))
-
-```
-
-Using with React:
-```js
-import PicoStore from 'picostore'
-import { useState, useEffect } from 'react'
-
-// PicoHook
-function usePico (store, name) {
-  const [value, set] = useState(store.state[name])
-  useEffect(() => store.on(name, set), [store, name, set]) // ensure unsub on unmount
-  return value
-}
-
-// Initialize a store maintaining "posts"
-const store = new PicoStore(...)
-store.register('posts', ...)
-
-function ListPostsComponent() {
-  const posts = usePico(store, 'posts')
-  return (<ul>
-    {posts.map(post => (<li>{post.title}</li>))}
-  </ul>)
-}
-```
 ## API
 
 TODO:
@@ -129,6 +93,17 @@ effort and time.
 ```
 
 ## Changelog
+
+### [3.0.0] - 2024-07-29
+
+- Migrated to Picofeed 8.x
+- Completeley reworked stores into 'Memory'
+- combined `filter()`, `rreduce()` callbacks into `compute()`
+- Garbage collector now uses Reference counting.
+- Dropped required `sweep()` callback, possible to override default if needed.
+- `signal()` and `trap()` is mostly unchanged
+- New api's missing docs: `index()`, `lookup()`, `postpone()`
+- Jumped from `msgpackr` to `cborg`, not sure why.
 
 ### [2.0.0] - 2022-10-19
 - WeblocksAPI
