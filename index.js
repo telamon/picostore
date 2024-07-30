@@ -24,6 +24,8 @@ const SymSignal = Symbol.for('PiC0VM::signal')
 /**
     @typedef {{ [SymReject]: true, message?: string, silent: boolean }} Rejection
     @typedef {{ [SymPostpone]: true, message?: string, time: number, retries: number }} Reschedule
+    @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
+
     @typedef {{
       block: Block,
       parentBlock: Block,
@@ -44,13 +46,11 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       signal: (name: string, payload: any) => void
     }} ComputeContext
 
-    @typedef {(ctx: { CHAIN: hexstring, AUTHOR: hexstring }) => Promise<ObjectId>} IdentityFunction
+    @typedef {(ctx: { CHAIN: hexstring, AUTHOR: hexstring, block?: Block }) => Promise<ObjectId>} IdentityFunction
 
     @typedef {(value: any, context: ComputeContext) => Promise<Rejection|Reschedule|any>} ComputeFunction
 
-    @typedef {(value: any, latch: (root:string, id: ObjectId) => number) => number|Infinity} ExpiresFunction
-
-    @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
+    @typedef {(value: any, latch: (root:string, id: ObjectId) => number) => Promise<number|Infinity>} ExpiresFunction
  */
 
 /**
@@ -144,7 +144,7 @@ export class Memory {
     await this.store.repo.writeReg(k, toU8(blockId))
   }
 
-  async #lookup (secondaryKey) {
+  async lookup (secondaryKey) {
     const k = ccat(toU8('sIdx'), toU8(this.name), toU8(secondaryKey))
     return this.store.repo.readReg(k)
   }
@@ -182,7 +182,7 @@ export class Memory {
       reject,
       postpone,
       index: key => indices.push(key), // Index op is post-apply
-      lookup: async key => this.#lookup(key), // Lookups are immediate
+      lookup: async key => this.lookup(key), // Lookups are immediate
       // Signals are always exected after a block
       signal: (type, payload) => signals.push({ [SymSignal]: true, type, payload, objId: id, rootName: this.name })
     }
