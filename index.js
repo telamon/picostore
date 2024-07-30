@@ -43,7 +43,12 @@ const SymSignal = Symbol.for('PiC0VM::signal')
       index: (key: u8|string) => void,
       signal: (name: string, payload: any) => void
     }} ComputeContext
-    @typedef {(value: any, context: DispatchContext) => Promise<Rejection|Reschedule|any>} ComputeFunction
+
+    @typedef {(ctx: { CHAIN: hexstring, AUTHOR: hexstring }) => Promise<ObjectId>} IdentityFunction
+
+    @typedef {(value: any, context: ComputeContext) => Promise<Rejection|Reschedule|any>} ComputeFunction
+
+    @typedef {(value: any, latch: (root:string, id: ObjectId) => number) => number|Infinity} ExpiresFunction
 
     @typedef {{ [SymSignal]: true, type: string, payload: any, objId: u8, rootName: string }} SignalInterrupt
  */
@@ -89,13 +94,17 @@ export class Memory {
 
   /// Begin hooks
 
-  /** @param {{ CHAIN: Signature, AUTHOR: PublicKey}} ctx
-    * @return {Promise<ObjectId>} */
+  /**
+   * Generate an object identity from chain
+   * or author or use an integer of your own choice.
+   * This the reference in state
+   * @type {IdentityFunction} */
   async idOf ({ CHAIN, AUTHOR }) { return this.store.repo.allowDetached ? CHAIN : AUTHOR }
 
-  /** @param {any} value The current state
-   *  @param {(root:string, id: ObjectId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
-   *  @return {Promise<number|Infinity>} */
+  /**
+   * Schedule removal
+   * @param {(root:string, id: ObjectId) => number} latch Tell garbage collector to latch this object's expiry onto another object.
+   * @type {ExpiresFunction} */
   async expiresAt (value, latch) { return Infinity }
 
   /** @type {ComputeFunction} */
