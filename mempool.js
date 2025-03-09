@@ -1,28 +1,43 @@
-const Feed = require('picofeed')
+import { Block, feedFrom, Feed } from 'picofeed'
 // TODO:
-// - extract into separate package (sibling to repo)
 // - choose eviction algo (avoid ddos)
-class SparseBlockCache {
+export class Mempool {
+  /** @typedef {import('abstract-level').AbstractLevel<any,Uint8Array,Uint8Array>} BinaryLevel */
+  /** @typedef {import('picofeed').SignatureBin} SignatureBin */
+  /** @type {BinaryLevel} */
+  blocks = null
+  /** @type {BinaryLevel} */
+  refs = null
+
+  /** @constructor
+    * @param {BinaryLevel} db */
   constructor (db) {
     this.blocks = db.sublevel('b', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
+      keyEncoding: 'view',
+      valueEncoding: 'view'
     })
+
     this.refs = db.sublevel('r', {
-      keyEncoding: 'buffer',
-      valueEncoding: 'buffer'
+      keyEncoding: 'view',
+      valueEncoding: 'view'
     })
   }
 
+  /** @param {Feed} feed */
   async push (feed) {
-    if (feed.first.isGenesis) throw new Error('GenesisRefused')
-    for (const block of feed.blocks()) {
+    if (feed.first.genesis) throw new Error('GenesisRefused')
+    for (const block of feed.blocks) {
       // Store forward ref
-      await this.refs.put(block.parentSig, block.sig)
+      await this.refs.put(block.psig, block.sig)
       await this._writeBlock(block)
     }
   }
 
+  /**
+   * @param {SignatureBin} backward
+   * @param {SignatureBin} forward
+   * @return {Promise<Feed[]>}
+   */
   async pop (backward, forward) {
     const delRefs = []
     const delBlocks = []
@@ -33,12 +48,12 @@ class SparseBlockCache {
     while (1) {
       const block = await this._readBlock(next)
       if (!block) break
-      delRefs.push(block.parentSig)
-      delBlocks.push(block.parentSig)
+      delRefs.push(block.psig)
+      delBlocks.push(block.psig)
       blocks.push(block)
-      next = block.parentSig
+      next = block.psig
     }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+    if (blocks.length) segments.push(feedFrom(blocks, true))
 
     // Load forward
     next = forward
@@ -52,7 +67,7 @@ class SparseBlockCache {
       blocks.push(block)
       next = block.sig
     }
-    if (blocks.length) segments.push(Feed.fromBlockArray(blocks))
+    if (blocks.length) segments.push(feedFrom(blocks, true))
 
     await Promise.all([
       this.blocks.batch(delBlocks.map(key => ({ type: 'del', key }))),
@@ -61,24 +76,22 @@ class SparseBlockCache {
     return segments
   }
 
+  /** @type {(block: Block) => Promise<void>} */
   async _writeBlock (block) {
     const key = block.sig
-    const buffer = Buffer.alloc(32 + block.buffer.length)
-    block.key.copy(buffer, 0)
-    block.buffer.copy(buffer, 32)
-    await this.blocks.put(key, buffer)
+    await this.blocks.put(key, block.buffer)
   }
 
+  /** @type {(id: SignatureBin) => Promise<Block>} */
   async _readBlock (id) {
     const buffer = await this.blocks.get(id).catch(ignore404)
-    if (buffer) return Feed.mapBlock(buffer, 32, buffer.slice(0, 32))
+    if (buffer) return new Block(buffer)
   }
 
+  /** @type {(id: SignatureBin) => Promise<boolean>} */
   async _hasBlock (id) {
-    return !!(await this.readBlock(id))
+    return !!(await this._readBlock(id))
   }
 }
 
 function ignore404 (err) { if (!err.notFound) throw err }
-
-module.exports = SparseBlockCache

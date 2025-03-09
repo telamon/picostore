@@ -1,14 +1,25 @@
 {
   "name": "@telamon/picostore",
-  "version": "2.0.6",
-  "description": "Magical redux-like state handler using picofeed blockchains",
+  "version": "3.0.4",
+  "description": "The block engine and indexer of picofeed",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "scheduler.js",
+    "scheduler.d.ts",
+    "mempool.js",
+    "mempool.d.ts"
+  ],
+  "type": "module",
   "scripts": {
-    "lint": "standard",
-    "test": "tape test.js",
-    "debug": "node inspect $(npm bin)/tape test.js",
-    "prepublishOnly": "standard && npm test"
+    "lint": "standard --fix",
+    "test": "node test.js",
+    "debug": "node inspect test.js",
+    "prepublishOnly": "standard && npm test && npm run types",
+    "types": "(rm *.ts || true) && tsc --skipLibCheck --emitDeclarationOnly --allowJs --checkJs --declaration --removeComments --lib es2022 --target es2022 --moduleResolution nodenext --module nodenext index.js"
   },
+  "types": "index.d.ts",
   "repository": {
     "type": "git",
     "url": "git://github.com/telamon/picostore"
@@ -20,15 +31,18 @@
   },
   "homepage": "https://github.com/telamon/picostore",
   "devDependencies": {
+    "@types/web": "^0.0.151",
+    "brittle": "^3.6.1",
+    "c8": "^10.1.2",
+    "cborg": "^4.2.3",
     "memory-level": "^1.0.0",
-    "msgpackr": "^1.7.0",
-    "picofeed": "^3.4.1",
-    "picorepo": "^1.4.5",
-    "standard": "^17.0.0",
-    "tape": "^5.6.1"
+    "picofeed": "^8.0.5",
+    "picorepo": "^2.2.5",
+    "standard": "^17.1.0"
   },
   "peerDependencies": {
-    "picofeed": "^3.4.1",
-    "picorepo": "^1.4.5"
+    "cborg": "^4.0.5",
+    "picofeed": "^8.0.5",
+    "picorepo": "^2.2.5"
   }
 }
